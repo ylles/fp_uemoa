@@ -1,0 +1,1306 @@
+---
+title: "Analyse IPTW Complète - UEMOA avec Dépenses de Santé"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+options(scipen = 999)
+options(survey.lonely.psu = "adjust")
+```
+
+# 1. Chargement des packages
+
+```{r packages}
+library(haven)
+library(dplyr)
+library(tidyr)
+library(survey)
+library(cobalt)
+library(WeightIt)
+library(writexl)
+library(EValue)
+library(officer)
+library(flextable)
+library(ggplot2)
+library(gridExtra)
+
+base_path <- "C:/Users/mamad/xxxxx/Enquete menages/EHCVM"
+```
+
+# 2. Définition des pays et périodes
+
+```{r setup-data}
+countries <- list(
+  BEN = list(code = "BEN", name = "Benin"),
+  BFA = list(code = "BFA", name = "Burkina Faso"),
+  CIV = list(code = "CIV", name = "Côte d'Ivoire"),
+  GNB = list(code = "GNB", name = "Guinea-Bissau"),
+  MLI = list(code = "MLI", name = "Mali"),
+  NER = list(code = "NER", name = "Niger"),
+  SEN = list(code = "SEN", name = "Senegal"),
+  TGO = list(code = "TGO", name = "Togo")
+)
+
+periods <- list(
+  "2018" = "2018-2019",
+  "2021" = "2021-2022"
+)
+
+results_folder <- paste0("Resultats_IPTW_Complet_", Sys.Date())
+dir.create(results_folder, showWarnings = FALSE)
+
+balance_forgone_folder <- file.path(results_folder, "Balance_Forgone_Care")
+balance_expenditure_folder <- file.path(results_folder, "Balance_Expenditure")
+plots_folder <- file.path(results_folder, "Plots")
+
+dir.create(balance_forgone_folder, showWarnings = FALSE)
+dir.create(balance_expenditure_folder, showWarnings = FALSE)
+dir.create(plots_folder, showWarnings = FALSE)
+```
+
+# 3. Fonctions d'analyse IPTW
+
+## 3.1 Fonction pour le renoncement aux soins (outcome catégoriel)
+
+```{r analysis-function-forgone}
+analyze_insurance <- function(data, treatment_var, other_insurances = NULL, 
+                             country_name = "", period = "") {
+  
+  if(!treatment_var %in% names(data)) return(NULL)
+  
+  n_treated <- sum(data[[treatment_var]], na.rm = TRUE)
+  if(n_treated < 30) return(NULL)
+  
+  if("maladie" %in% names(data)) {
+    n_missing_initial <- sum(is.na(data$maladie))
+    
+    if(n_missing_initial > 0) {
+      data <- data %>%
+        mutate(maladie_missing = as.numeric(is.na(maladie)))
+      
+      prop_malade <- mean(data$maladie[!is.na(data$maladie)] == 1)
+      n_missing <- sum(is.na(data$maladie))
+      set.seed(12345)
+      data$maladie[is.na(data$maladie)] <- rbinom(n_missing, 1, prop_malade)
+      
+      cat("  Imputation maladie - Missing:", n_missing, 
+          "obs. imputées aléatoirement (prop =", round(prop_malade, 3), ")\n")
+    } else {
+      data <- data %>%
+        mutate(maladie_missing = 0)
+    }
+  }
+  
+  ps_vars <- c("age", "I(age^2)", "sexe", "lien", "mstat", "religion",
+               "educ_hi", "diplome", "activ12m", "maladie", "use365", "handig",
+               "milieu", "hhsize", "quintile", "hgender", "hage", "hmstat", "heduc")
+  
+  if("maladie_missing" %in% names(data)) {
+    ps_vars <- c(ps_vars, "maladie_missing")
+  }
+  
+  if(!is.null(other_insurances)) {
+    ps_vars <- c(ps_vars, other_insurances)
+  }
+  
+  simple_vars <- ps_vars[!grepl("^I\\(", ps_vars)]
+  available_vars <- simple_vars[simple_vars %in% names(data)]
+  available_vars <- available_vars[available_vars != "use90"]
+  final_ps_vars <- c(available_vars, ps_vars[grepl("^I\\(", ps_vars)])
+  
+  ps_formula <- as.formula(paste(treatment_var, "~", paste(final_ps_vars, collapse = " + ")))
+  ps_model <- glm(ps_formula, data = data, family = binomial())
+  
+  if(!ps_model$converged) return(NULL)
+  
+  ps_scores <- predict(ps_model, type = "response")
+  
+  treatment <- data[[treatment_var]]
+  iptw_raw <- ifelse(treatment == 1, 1, ps_scores/(1-ps_scores))
+  iptw_trunc <- pmin(iptw_raw, 20)
+  
+  balance_vars <- c("age", "sexe", "lien", "mstat", "religion", "educ_hi", 
+                    "activ12m", "maladie", "use365", "handig", "milieu", 
+                    "hhsize", "quintile", "hgender", "hage", "hmstat", "heduc")
+  
+  if("maladie_missing" %in% names(data)) {
+    balance_vars <- c(balance_vars, "maladie_missing")
+  }
+  
+  balance_vars <- balance_vars[balance_vars %in% names(data)]
+  balance_vars <- balance_vars[balance_vars != "use90"]
+  
+  covs <- data %>% 
+    select(all_of(balance_vars)) %>%
+    mutate(across(where(is.factor), as.numeric))
+  
+  bal_tab <- bal.tab(covs,
+                     treat = treatment,
+                     weights = iptw_trunc,
+                     method = "weighting",
+                     estimand = "ATT",
+                     disp = c("means", "sds"),
+                     stats = c("mean.diffs"),
+                     thresholds = c(m = 0.1))
+  
+  final_weights <- iptw_trunc * data$hhweight
+  
+  data_design <- data %>%
+    filter(!is.na(non_soinsttfin)) %>%
+    mutate(
+      outcome_multi = factor(non_soinsttfin, 
+                            levels = c(0, 1, 2),
+                            labels = c("No_forgone", "Financial_forgone", "Non_financial_forgone")),
+      treatment = get(treatment_var),
+      final_weights = final_weights[!is.na(data$non_soinsttfin)],
+      individual_id = row_number(),
+      outcome_financial = as.numeric(non_soinsttfin == 1),
+      outcome_nonfin = as.numeric(non_soinsttfin == 2)
+    )
+  
+  survey_design <- svydesign(
+    id = ~ grappe + individual_id,
+    strata = ~ region,
+    weights = ~ final_weights,
+    data = data_design,
+    nest = TRUE
+  )
+  
+  results_multi <- list()
+  
+  data_subset_fin <- subset(survey_design, outcome_multi %in% c("No_forgone", "Financial_forgone"))
+  model_fin <- svyglm(outcome_financial ~ treatment, 
+                      design = data_subset_fin,
+                      family = quasibinomial())
+  
+  coef_fin <- coef(model_fin)["treatment"]
+  se_fin <- sqrt(diag(vcov(model_fin)))["treatment"]
+  or_fin <- exp(coef_fin)
+  or_fin_lower <- exp(coef_fin - 1.96 * se_fin)
+  or_fin_upper <- exp(coef_fin + 1.96 * se_fin)
+  p_fin <- summary(model_fin)$coefficients["treatment", "Pr(>|t|)"]
+  
+  results_multi$financial <- list(
+    or = or_fin,
+    or_lower = or_fin_lower,
+    or_upper = or_fin_upper,
+    p_value = p_fin
+  )
+  
+  data_subset_nonfin <- subset(survey_design, outcome_multi %in% c("No_forgone", "Non_financial_forgone"))
+  model_nonfin <- svyglm(outcome_nonfin ~ treatment, 
+                         design = data_subset_nonfin,
+                         family = quasibinomial())
+  
+  coef_nonfin <- coef(model_nonfin)["treatment"]
+  se_nonfin <- sqrt(diag(vcov(model_nonfin)))["treatment"]
+  or_nonfin <- exp(coef_nonfin)
+  or_nonfin_lower <- exp(coef_nonfin - 1.96 * se_nonfin)
+  or_nonfin_upper <- exp(coef_nonfin + 1.96 * se_nonfin)
+  p_nonfin <- summary(model_nonfin)$coefficients["treatment", "Pr(>|t|)"]
+  
+  results_multi$non_financial <- list(
+    or = or_nonfin,
+    or_lower = or_nonfin_lower,
+    or_upper = or_nonfin_upper,
+    p_value = p_nonfin
+  )
+  
+  e_values <- list()
+  
+  e_val_fin <- evalues.OR(
+    est = results_multi$financial$or,
+    lo = results_multi$financial$or_lower,
+    hi = results_multi$financial$or_upper,
+    rare = TRUE
+  )
+  e_values$financial <- e_val_fin[2]
+  
+  e_val_nonfin <- evalues.OR(
+    est = results_multi$non_financial$or,
+    lo = results_multi$non_financial$or_lower,
+    hi = results_multi$non_financial$or_upper,
+    rare = TRUE
+  )
+  e_values$non_financial <- e_val_nonfin[2]
+  
+  methods <- list(
+    "IPTW-20" = pmin(iptw_raw, 20),
+    "IPTW-10" = pmin(iptw_raw, 10),
+    "Overlap" = ifelse(treatment == 1, 1, ps_scores)
+  )
+  
+  sensitivity_results <- list(financial = data.frame(), non_financial = data.frame())
+  
+  for(method_name in names(methods)) {
+    weights_method <- methods[[method_name]] * data$hhweight
+    
+    data_sens <- data %>%
+      filter(!is.na(non_soinsttfin)) %>%
+      mutate(
+        outcome_multi = factor(non_soinsttfin, levels = c(0, 1, 2)),
+        treatment = get(treatment_var),
+        final_weights = weights_method[!is.na(data$non_soinsttfin)],
+        individual_id = row_number(),
+        outcome_financial = as.numeric(non_soinsttfin == 1),
+        outcome_nonfin = as.numeric(non_soinsttfin == 2)
+      )
+    
+    survey_sens <- svydesign(
+      id = ~ grappe + individual_id,
+      strata = ~ region,
+      weights = ~ final_weights,
+      data = data_sens,
+      nest = TRUE
+    )
+    
+    data_subset_fin_sens <- subset(survey_sens, outcome_multi %in% c(0, 1))
+    model_fin_sens <- svyglm(outcome_financial ~ treatment, 
+                            design = data_subset_fin_sens,
+                            family = quasibinomial())
+    
+    sensitivity_results$financial <- rbind(sensitivity_results$financial, 
+                                          data.frame(
+                                            Method = method_name,
+                                            OR = exp(coef(model_fin_sens)["treatment"])
+                                          ))
+    
+    data_subset_nonfin_sens <- subset(survey_sens, outcome_multi %in% c(0, 2))
+    model_nonfin_sens <- svyglm(outcome_nonfin ~ treatment, 
+                               design = data_subset_nonfin_sens,
+                               family = quasibinomial())
+    
+    sensitivity_results$non_financial <- rbind(sensitivity_results$non_financial, 
+                                              data.frame(
+                                                Method = method_name,
+                                                OR = exp(coef(model_nonfin_sens)["treatment"])
+                                              ))
+  }
+  
+  return(list(
+    variable = treatment_var,
+    n_treated = sum(treatment),
+    n_control = sum(1 - treatment),
+    balance_table = bal_tab$Balance,
+    results_multi = results_multi,
+    e_values = e_values,
+    sensitivity = sensitivity_results
+  ))
+}
+```
+
+## 3.2 Fonction pour les dépenses de santé (outcome continu)
+
+```{r analysis-function-expenditure}
+analyze_health_expenditure <- function(data, treatment_var, other_insurances = NULL, 
+                                     country_name = "", period = "") {
+  
+  if(!treatment_var %in% names(data)) return(NULL)
+  
+  data_users <- data %>% filter(use == 1)
+  n_initial_users <- nrow(data_users)
+  
+  data_users <- data_users %>%
+    mutate(oop_share = ifelse(dtot > 0, oop / dtot, 0)) %>%
+    filter(!is.na(oop_share))
+  
+  if("maladie" %in% names(data_users)) {
+    n_missing_initial <- sum(is.na(data_users$maladie))
+    
+    if(n_missing_initial > 0) {
+      data_users <- data_users %>%
+        mutate(maladie_missing = as.numeric(is.na(maladie)))
+      
+      prop_malade <- mean(data_users$maladie[!is.na(data_users$maladie)] == 1)
+      n_missing <- sum(is.na(data_users$maladie))
+      set.seed(12345)
+      data_users$maladie[is.na(data_users$maladie)] <- rbinom(n_missing, 1, prop_malade)
+      
+      cat("  Imputation maladie - Missing:", n_missing, 
+          "obs. imputées aléatoirement (prop =", round(prop_malade, 3), ")\n")
+    } else {
+      data_users <- data_users %>%
+        mutate(maladie_missing = 0)
+    }
+  }
+  
+  cat("\n", country_name, "-", period, "-", treatment_var, ":\n")
+  cat("  Utilisateurs initiaux:", n_initial_users, "\n")
+  cat("  Après exclusion OOP share missing:", nrow(data_users), "\n")
+  
+  prop_missing <- 0
+  
+  if(all(c("use30", "use30_prest", "use30_praticien") %in% names(data_users))) {
+    missing_check <- data_users %>%
+      summarise(
+        miss_use30_prest = sum(is.na(use30_prest) & use30 == 1),
+        miss_use30_praticien = sum(is.na(use30_praticien) & use30 == 1),
+        miss_use365_prest = ifelse("use365_prest" %in% names(data_users), 
+                                   sum(is.na(use365_prest) & use365 == 1), 0),
+        n_total = n()
+      )
+    
+    if(missing_check$n_total > 0) {
+      prop_missing <- max(missing_check$miss_use30_prest, missing_check$miss_use30_praticien) / missing_check$n_total
+    }
+    
+    if(prop_missing < 0.1 && prop_missing > 0) {
+      data_users <- data_users %>%
+        filter(
+          (use30 == 0 | !is.na(use30_prest)) &
+          (use30 == 0 | !is.na(use30_praticien))
+        )
+      
+      if("use365_prest" %in% names(data_users) && "use365" %in% names(data_users)) {
+        data_users <- data_users %>%
+          filter(use365 == 0 | !is.na(use365_prest))
+      }
+      
+      cat("  Après exclusion missing (<10%):", nrow(data_users), "\n")
+    }
+  }
+  
+  n_treated <- sum(data_users[[treatment_var]], na.rm = TRUE)
+  n_control <- sum(1 - data_users[[treatment_var]], na.rm = TRUE)
+  cat("  Échantillon final - Traités:", n_treated, "| Contrôles:", n_control, "\n")
+  
+  if(n_treated < 30) {
+    cat("  Nombre de traités insuffisant\n")
+    return(NULL)
+  }
+  
+  ps_vars_base <- c("age", "I(age^2)", "sexe", "lien", "mstat", "religion",
+                     "educ_hi", "diplome", "milieu", "hhsize")
+  
+  ps_vars_econ <- c("quintile", "activ12m")
+  
+  ps_vars_health <- c("maladie", "use365", "handig")
+  
+  if("maladie_missing" %in% names(data_users)) {
+    ps_vars_health <- c(ps_vars_health, "maladie_missing")
+  }
+  
+  ps_vars_household <- c("hgender", "hage", "hmstat", "heduc")
+  
+  ps_vars <- c(ps_vars_base, ps_vars_econ, ps_vars_health, ps_vars_household)
+  
+  if(prop_missing < 0.05 && "use30_prest" %in% names(data_users) && "use30_praticien" %in% names(data_users)) {
+    ps_vars <- c(ps_vars, "use30_prest", "use30_praticien")
+  }
+  
+  if(!is.null(other_insurances)) {
+    ps_vars <- c(ps_vars, other_insurances)
+  }
+  
+  simple_vars <- ps_vars[!grepl("^I\\(", ps_vars)]
+  available_vars <- simple_vars[simple_vars %in% names(data_users)]
+  final_ps_vars <- c(available_vars, ps_vars[grepl("^I\\(", ps_vars)])
+  
+  cat("  Variables PS utilisées:", length(final_ps_vars), "\n")
+  
+  ps_formula <- as.formula(paste(treatment_var, "~", paste(final_ps_vars, collapse = " + ")))
+  ps_model <- glm(ps_formula, data = data_users, family = binomial())
+  
+  if(!ps_model$converged) {
+    cat("  Modèle PS non convergé\n")
+    return(NULL)
+  }
+  
+  ps_scores <- predict(ps_model, type = "response")
+  
+  treatment <- data_users[[treatment_var]]
+  iptw_raw <- ifelse(treatment == 1, 1, ps_scores/(1-ps_scores))
+  iptw_trunc <- pmin(iptw_raw, 20)
+  
+  balance_vars <- c("age", "sexe", "lien", "mstat", "religion", "educ_hi", 
+                    "activ12m", "maladie", "use365", "handig", "milieu", 
+                    "hhsize", "quintile", "hgender", "hage", "hmstat", "heduc")
+  
+  if("maladie_missing" %in% names(data_users)) {
+    balance_vars <- c(balance_vars, "maladie_missing")
+  }
+  
+  if("use30_prest" %in% final_ps_vars) balance_vars <- c(balance_vars, "use30_prest") 
+  if("use30_praticien" %in% final_ps_vars) balance_vars <- c(balance_vars, "use30_praticien")
+  
+  balance_vars <- balance_vars[balance_vars %in% names(data_users)]
+  
+  covs <- data_users %>% 
+    select(all_of(balance_vars)) %>%
+    mutate(across(where(is.factor), as.numeric))
+  
+  bal_tab <- bal.tab(covs,
+                     treat = treatment,
+                     weights = iptw_trunc,
+                     method = "weighting",
+                     estimand = "ATT",
+                     disp = c("means", "sds"),
+                     stats = c("mean.diffs"),
+                     thresholds = c(m = 0.1))
+  
+  final_weights <- iptw_trunc * data_users$hhweight
+  
+  data_design <- data_users %>%
+    mutate(
+      treatment = get(treatment_var),
+      final_weights = final_weights,
+      individual_id = row_number()
+    )
+  
+  survey_design <- svydesign(
+    id = ~ grappe + individual_id,
+    strata = ~ region,
+    weights = ~ final_weights,
+    data = data_design,
+    nest = TRUE
+  )
+  
+  model <- svyglm(oop_share ~ treatment, 
+                  design = survey_design,
+                  family = gaussian())
+  
+  coef_val <- coef(model)["treatment"]
+  se_val <- sqrt(diag(vcov(model)))["treatment"]
+  ci_lower <- coef_val - 1.96 * se_val
+  ci_upper <- coef_val + 1.96 * se_val
+  p_val <- summary(model)$coefficients["treatment", "Pr(>|t|)"]
+  
+  means_by_group <- svyby(~oop_share, ~treatment, survey_design, svymean)
+  
+  results <- list(
+    coefficient = coef_val,
+    se = se_val,
+    ci_lower = ci_lower,
+    ci_upper = ci_upper,
+    p_value = p_val,
+    mean_control = means_by_group[1, "oop_share"],
+    mean_treated = means_by_group[2, "oop_share"]
+  )
+  
+  methods <- list(
+    "IPTW-20" = pmin(iptw_raw, 20),
+    "IPTW-10" = pmin(iptw_raw, 10),
+    "Overlap" = ifelse(treatment == 1, 1, ps_scores)
+  )
+  
+  sensitivity_results <- data.frame()
+  
+  for(method_name in names(methods)) {
+    weights_method <- methods[[method_name]] * data_users$hhweight
+    
+    data_sens <- data_users %>%
+      mutate(
+        treatment = get(treatment_var),
+        final_weights = weights_method,
+        individual_id = row_number()
+      )
+    
+    survey_sens <- svydesign(
+      id = ~ grappe + individual_id,
+      strata = ~ region,
+      weights = ~ final_weights,
+      data = data_sens,
+      nest = TRUE
+    )
+    
+    model_sens <- svyglm(oop_share ~ treatment, 
+                        design = survey_sens,
+                        family = gaussian())
+    
+    sensitivity_results <- rbind(sensitivity_results, 
+                                data.frame(
+                                  Method = method_name,
+                                  Coefficient = coef(model_sens)["treatment"],
+                                  SE = sqrt(diag(vcov(model_sens)))["treatment"]
+                                ))
+  }
+  
+  return(list(
+    variable = treatment_var,
+    n_treated = sum(treatment),
+    n_control = sum(1 - treatment),
+    n_users = nrow(data_users),
+    n_initial_users = n_initial_users,
+    balance_table = bal_tab$Balance,
+    results = results,
+    sensitivity = sensitivity_results,
+    ps_vars_used = final_ps_vars
+  ))
+}
+```
+
+# 4. Traitement d'un pays/période
+
+```{r process-function}
+process_country_period <- function(country, period_year) {
+  
+  data_path <- file.path(base_path, periods[[period_year]], "interm",
+                        paste0("A", country$code, period_year, "_individus_assu.dta"))
+  
+  if(!file.exists(data_path)) return(NULL)
+  
+  raw_data <- haven::read_dta(data_path)
+  
+  analysis_variables <- c(
+    "hhid", "hhweight", "grappe", "region",
+    "couvmal", "assu_ext", "assu_soc",
+    "non_soinsttfin", "oop", "dtot", "use",
+    "sexe", "age", "lien", "mstat", "religion",
+    "educ_hi", "diplome", "activ12m", 
+    "maladie", "use365", "handig",
+    "hhsize", "milieu", "pcexp", "quintile",
+    "hgender", "hage", "hmstat", "heduc"
+  )
+  
+  existing_variables <- analysis_variables[analysis_variables %in% names(raw_data)]
+  
+  data <- raw_data %>%
+    select(all_of(existing_variables)) %>%
+    filter(!is.na(non_soinsttfin)) %>%
+    mutate(
+      across(c("sexe", "milieu", "lien", "mstat", "religion", 
+               "educ_hi", "diplome", "activ12m", "handig",
+               "use365", "quintile",
+               "hgender", "hmstat", "heduc"), 
+             ~as.factor(as.character(.))),
+      maladie = as.factor(as.character(maladie)),
+      age = as.numeric(age),
+      hhsize = as.numeric(hhsize),
+      oop = as.numeric(oop),
+      dtot = as.numeric(dtot),
+      use = as.numeric(use)
+    ) %>%
+    drop_na(couvmal, non_soinsttfin, age, sexe, milieu)
+  
+  results <- list()
+  
+  results$couvmal <- analyze_insurance(data, "couvmal", 
+                                      country_name = country$name, 
+                                      period = period_year)
+  
+  if("assu_ext" %in% names(data) && "assu_soc" %in% names(data)) {
+    results$assu_ext <- analyze_insurance(data, "assu_ext", 
+                                         other_insurances = "assu_soc",
+                                         country_name = country$name, 
+                                         period = period_year)
+    
+    results$assu_soc <- analyze_insurance(data, "assu_soc", 
+                                         other_insurances = "assu_ext",
+                                         country_name = country$name, 
+                                         period = period_year)
+  }
+  
+  results$couvmal_expenditure <- analyze_health_expenditure(data, "couvmal", 
+                                                           country_name = country$name, 
+                                                           period = period_year)
+  
+  if("assu_ext" %in% names(data) && "assu_soc" %in% names(data)) {
+    results$assu_ext_expenditure <- analyze_health_expenditure(data, "assu_ext", 
+                                                              other_insurances = "assu_soc",
+                                                              country_name = country$name, 
+                                                              period = period_year)
+    
+    results$assu_soc_expenditure <- analyze_health_expenditure(data, "assu_soc", 
+                                                              other_insurances = "assu_ext",
+                                                              country_name = country$name, 
+                                                              period = period_year)
+  }
+  
+  return(list(
+    country = country$name,
+    country_code = country$code,
+    period = period_year,
+    results = results
+  ))
+}
+```
+
+# 5. Exécuter toutes les analyses
+
+```{r run-all-analyses}
+all_results_complete <- list()
+
+for(country_code in names(countries)) {
+  country <- countries[[country_code]]
+  
+  for(period_year in names(periods)) {
+    key <- paste(country_code, period_year, sep = "_")
+    result <- process_country_period(country, period_year)
+    
+    if(!is.null(result)) {
+      all_results_complete[[key]] <- result
+    }
+  }
+}
+
+cat("Analyses terminées pour", length(all_results_complete), "pays-périodes\n")
+```
+
+# 6. Créer les tableaux de résumé
+
+```{r create-summary-tables}
+summary_list <- list()
+expenditure_summary_list <- list()
+sensitivity_list <- list()
+expenditure_sensitivity_list <- list()
+balance_list <- list()
+
+for(key in names(all_results_complete)) {
+  res <- all_results_complete[[key]]
+  
+  base_info <- data.frame(
+    Country = res$country,
+    Country_Code = res$country_code,
+    Period = res$period,
+    stringsAsFactors = FALSE
+  )
+  
+  for(ins_type in c("couvmal", "assu_ext", "assu_soc")) {
+    if(!is.null(res$results[[ins_type]])) {
+      
+      if(!is.null(res$results[[ins_type]]$results_multi$financial)) {
+        fin <- res$results[[ins_type]]$results_multi$financial
+        row_fin <- cbind(
+          base_info,
+          Insurance_Type = ins_type,
+          Forgone_Type = "Financial",
+          N_Treated = res$results[[ins_type]]$n_treated,
+          N_Control = res$results[[ins_type]]$n_control,
+          OR = round(fin$or, 3),
+          OR_Lower = round(fin$or_lower, 3),
+          OR_Upper = round(fin$or_upper, 3),
+          P_Value = round(fin$p_value, 4),
+          Significant = ifelse(fin$p_value < 0.05, "Yes", "No"),
+          E_Value = round(res$results[[ins_type]]$e_values$financial, 2)
+        )
+        summary_list[[length(summary_list) + 1]] <- row_fin
+      }
+      
+      if(!is.null(res$results[[ins_type]]$results_multi$non_financial)) {
+        nonfin <- res$results[[ins_type]]$results_multi$non_financial
+        row_nonfin <- cbind(
+          base_info,
+          Insurance_Type = ins_type,
+          Forgone_Type = "Non-financial",
+          N_Treated = res$results[[ins_type]]$n_treated,
+          N_Control = res$results[[ins_type]]$n_control,
+          OR = round(nonfin$or, 3),
+          OR_Lower = round(nonfin$or_lower, 3),
+          OR_Upper = round(nonfin$or_upper, 3),
+          P_Value = round(nonfin$p_value, 4),
+          Significant = ifelse(nonfin$p_value < 0.05, "Yes", "No"),
+          E_Value = round(res$results[[ins_type]]$e_values$non_financial, 2)
+        )
+        summary_list[[length(summary_list) + 1]] <- row_nonfin
+      }
+      
+      if(!is.null(res$results[[ins_type]]$sensitivity)) {
+        for(forgone_type in c("financial", "non_financial")) {
+          sens_data <- res$results[[ins_type]]$sensitivity[[forgone_type]]
+          if(nrow(sens_data) > 0) {
+            sens_data$Country <- res$country
+            sens_data$Period <- res$period
+            sens_data$Insurance_Type <- ins_type
+            sens_data$Forgone_Type <- forgone_type
+            sensitivity_list[[length(sensitivity_list) + 1]] <- sens_data
+          }
+        }
+      }
+      
+      if(!is.null(res$results[[ins_type]]$balance_table)) {
+        balance_summary <- data.frame(
+          Country = res$country,
+          Period = res$period,
+          Insurance_Type = ins_type,
+          Analysis = "Forgone care",
+          N_Unbalanced = sum(abs(res$results[[ins_type]]$balance_table$Diff.Adj) > 0.1, na.rm = TRUE),
+          N_Variables = nrow(res$results[[ins_type]]$balance_table)
+        )
+        balance_list[[length(balance_list) + 1]] <- balance_summary
+      }
+    }
+  }
+  
+  for(ins_type in c("couvmal_expenditure", "assu_ext_expenditure", "assu_soc_expenditure")) {
+    if(!is.null(res$results[[ins_type]])) {
+      
+      exp_res <- res$results[[ins_type]]$results
+      
+      clean_ins_type <- gsub("_expenditure", "", ins_type)
+      
+      ratio <- exp_res$mean_treated / exp_res$mean_control
+      reduction_pct <- (1 - ratio) * 100
+      
+      row_exp <- cbind(
+        base_info,
+        Insurance_Type = clean_ins_type,
+        N_Users = res$results[[ins_type]]$n_users,
+        N_Treated = res$results[[ins_type]]$n_treated,
+        N_Control = res$results[[ins_type]]$n_control,
+        OOP_Control = round(exp_res$mean_control * 100, 2),
+        OOP_Treated = round(exp_res$mean_treated * 100, 2),
+        Ratio = round(ratio, 3),
+        Reduction_Pct = round(reduction_pct, 1),
+        Coefficient_pp = round(exp_res$coefficient * 100, 3),
+        CI_Lower = round(exp_res$ci_lower * 100, 3),
+        CI_Upper = round(exp_res$ci_upper * 100, 3),
+        P_Value = round(exp_res$p_value, 4),
+        Significant = ifelse(exp_res$p_value < 0.05, "Yes", "No")
+      )
+      
+      expenditure_summary_list[[length(expenditure_summary_list) + 1]] <- row_exp
+      
+      if(!is.null(res$results[[ins_type]]$sensitivity)) {
+        sens_exp_data <- res$results[[ins_type]]$sensitivity
+        if(nrow(sens_exp_data) > 0) {
+          sens_exp_data$Country <- res$country
+          sens_exp_data$Period <- res$period
+          sens_exp_data$Insurance_Type <- clean_ins_type
+          sens_exp_data$Analysis_Type <- "Health_Expenditure"
+          sens_exp_data$Coefficient <- sens_exp_data$Coefficient * 100
+          sens_exp_data$SE <- sens_exp_data$SE * 100
+          expenditure_sensitivity_list[[length(expenditure_sensitivity_list) + 1]] <- sens_exp_data
+        }
+      }
+      
+      if(!is.null(res$results[[ins_type]]$balance_table)) {
+        balance_summary <- data.frame(
+          Country = res$country,
+          Period = res$period,
+          Insurance_Type = clean_ins_type,
+          Analysis = "Health expenditure",
+          N_Unbalanced = sum(abs(res$results[[ins_type]]$balance_table$Diff.Adj) > 0.1, na.rm = TRUE),
+          N_Variables = nrow(res$results[[ins_type]]$balance_table)
+        )
+        balance_list[[length(balance_list) + 1]] <- balance_summary
+      }
+    }
+  }
+}
+
+complete_results <- list(
+  summary = if(length(summary_list) > 0) do.call(rbind, summary_list) else NULL,
+  expenditure = if(length(expenditure_summary_list) > 0) do.call(rbind, expenditure_summary_list) else NULL,
+  sensitivity = if(length(sensitivity_list) > 0) do.call(rbind, sensitivity_list) else NULL,
+  expenditure_sensitivity = if(length(expenditure_sensitivity_list) > 0) do.call(rbind, expenditure_sensitivity_list) else NULL,
+  balance = if(length(balance_list) > 0) do.call(rbind, balance_list) else NULL
+)
+```
+
+# 7. Export Excel complet
+
+```{r export-excel}
+excel_sheets <- list()
+
+if(!is.null(complete_results$summary)) {
+  excel_sheets[["Forgone_Care"]] <- complete_results$summary
+}
+
+if(!is.null(complete_results$expenditure)) {
+  excel_sheets[["Health_Expenditure"]] <- complete_results$expenditure
+}
+
+if(!is.null(complete_results$balance)) {
+  excel_sheets[["Balance_Summary"]] <- complete_results$balance
+}
+
+if(!is.null(complete_results$sensitivity)) {
+  excel_sheets[["Sensitivity_Forgone"]] <- complete_results$sensitivity
+}
+
+if(!is.null(complete_results$expenditure_sensitivity)) {
+  excel_sheets[["Sensitivity_Expenditure"]] <- complete_results$expenditure_sensitivity
+}
+
+if(!is.null(complete_results$summary) && !is.null(complete_results$sensitivity)) {
+  
+  sens_wide <- complete_results$sensitivity %>%
+    filter(Forgone_Type == "Financial") %>%
+    select(Country, Period, Insurance_Type, Method, OR) %>%
+    pivot_wider(names_from = Method, values_from = OR, names_prefix = "OR_")
+  
+  sens_cols <- names(sens_wide)
+  or_cols <- sens_cols[grepl("^OR_", sens_cols)]
+  
+  synthesis_forgone <- complete_results$summary %>%
+    filter(Forgone_Type == "Financial") %>%
+    left_join(sens_wide, by = c("Country", "Period", "Insurance_Type"))
+  
+  base_cols <- c("Country", "Period", "Insurance_Type", "N_Treated", "N_Control",
+                 "OR", "OR_Lower", "OR_Upper", "P_Value", "Significant", "E_Value")
+  all_cols <- c(base_cols, or_cols)
+  available_cols <- all_cols[all_cols %in% names(synthesis_forgone)]
+  
+  synthesis_forgone <- synthesis_forgone %>%
+    select(all_of(available_cols)) %>%
+    arrange(Country, Period, Insurance_Type)
+  
+  excel_sheets[["Synthesis_Forgone_Financial"]] <- synthesis_forgone
+}
+
+if(!is.null(complete_results$expenditure) && !is.null(complete_results$expenditure_sensitivity)) {
+  
+  sens_exp_wide <- complete_results$expenditure_sensitivity %>%
+    select(Country, Period, Insurance_Type, Method, Coefficient) %>%
+    pivot_wider(names_from = Method, values_from = Coefficient, names_prefix = "Coef_")
+  
+  sens_exp_cols <- names(sens_exp_wide)
+  coef_cols <- sens_exp_cols[grepl("^Coef_", sens_exp_cols)]
+  
+  synthesis_expenditure <- complete_results$expenditure %>%
+    left_join(sens_exp_wide, by = c("Country", "Period", "Insurance_Type"))
+  
+  base_exp_cols <- c("Country", "Period", "Insurance_Type", "N_Users", "N_Treated", "N_Control",
+                     "OOP_Control", "OOP_Treated", "Ratio", "Reduction_Pct", 
+                     "Coefficient_pp", "CI_Lower", "CI_Upper", "P_Value", "Significant")
+  all_exp_cols <- c(base_exp_cols, coef_cols)
+  available_exp_cols <- all_exp_cols[all_exp_cols %in% names(synthesis_expenditure)]
+  
+  synthesis_expenditure <- synthesis_expenditure %>%
+    select(all_of(available_exp_cols)) %>%
+    arrange(Country, Period, Insurance_Type)
+  
+  excel_sheets[["Synthesis_Expenditure"]] <- synthesis_expenditure
+  
+  publication_table <- complete_results$expenditure %>%
+    filter(Significant == "Yes") %>%
+    mutate(
+      Effect = ifelse(Reduction_Pct < 0, 
+                     paste0(sprintf("%.0f", abs(Reduction_Pct)), "%"),
+                     paste0("+", sprintf("%.0f", Reduction_Pct), "%")),
+      CI_Low_Pct = (CI_Lower / OOP_Control) * 100,
+      CI_High_Pct = (CI_Upper / OOP_Control) * 100,
+      CI_95 = paste0("[", sprintf("%.0f", CI_Low_Pct), " to ", 
+                     sprintf("%.0f", CI_High_Pct), "%]"),
+      Comparison = paste0(sprintf("%.1f", OOP_Control), " → ", 
+                         sprintf("%.1f", OOP_Treated), "%"),
+      P_Display = case_when(
+        P_Value < 0.001 ~ "<0.001",
+        P_Value < 0.01 ~ sprintf("%.3f", P_Value),
+        TRUE ~ sprintf("%.2f", P_Value)
+      )
+    ) %>%
+    select(Country, Period, Insurance_Type, N_Treated, 
+           Comparison, Effect, CI_95, P_Display) %>%
+    rename(
+      "Insurance" = Insurance_Type,
+      "N" = N_Treated,
+      "OOP share (Control → Treated)" = Comparison,
+      "Reduction" = Effect,
+      "95% CI" = CI_95,
+      "p-value" = P_Display
+    ) %>%
+    arrange(Country, Period, Insurance)
+  
+  excel_sheets[["Publication_Table"]] <- publication_table
+}
+
+if(!is.null(complete_results$summary) || !is.null(complete_results$expenditure)) {
+  
+  summary_global <- data.frame()
+  
+  if(!is.null(complete_results$summary)) {
+    forgone_summary <- complete_results$summary %>%
+      filter(Forgone_Type == "Financial") %>%
+      group_by(Insurance_Type, Period) %>%
+      summarise(
+        Analysis = "Forgone care (financial)",
+        N_Countries = n(),
+        N_Significant = sum(Significant == "Yes"),
+        Mean_OR = exp(mean(log(OR), na.rm = TRUE)),
+        Min_OR = min(OR, na.rm = TRUE),
+        Max_OR = max(OR, na.rm = TRUE),
+        .groups = "drop"
+      )
+    summary_global <- rbind(summary_global, forgone_summary)
+  }
+  
+  if(!is.null(complete_results$expenditure)) {
+    exp_summary <- complete_results$expenditure %>%
+      group_by(Insurance_Type, Period) %>%
+      summarise(
+        Analysis = "Health expenditure share",
+        N_Countries = n(),
+        N_Significant = sum(Significant == "Yes"),
+        Mean_Reduction = mean(Reduction_Pct[Significant == "Yes"], na.rm = TRUE),
+        Min_Reduction = min(Reduction_Pct[Significant == "Yes"], na.rm = TRUE),
+        Max_Reduction = max(Reduction_Pct[Significant == "Yes"], na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      rename(Mean_OR = Mean_Reduction, Min_OR = Min_Reduction, Max_OR = Max_Reduction)
+    
+    summary_global <- rbind(summary_global, exp_summary)
+  }
+  
+  excel_sheets[["Summary_Global"]] <- summary_global
+}
+
+for(key in names(all_results_complete)) {
+  res <- all_results_complete[[key]]
+  
+  for(ins_type in names(res$results)) {
+    if(!is.null(res$results[[ins_type]]) && !is.null(res$results[[ins_type]]$balance_table)) {
+      
+      sheet_name <- substr(paste(res$country_code, res$period, gsub("_expenditure", "_exp", ins_type), sep="_"), 1, 31)
+      
+      bal_table <- res$results[[ins_type]]$balance_table
+      
+      bal_df <- data.frame(
+        Variable = rownames(bal_table),
+        bal_table,
+        N_Treated = res$results[[ins_type]]$n_treated,
+        N_Control = res$results[[ins_type]]$n_control
+      )
+      
+      excel_sheets[[sheet_name]] <- bal_df
+      
+      if(grepl("expenditure", ins_type)) {
+        balance_file <- file.path(balance_expenditure_folder, 
+                                 paste0("Balance_", res$country_code, "_", res$period, "_", 
+                                       gsub("_expenditure", "", ins_type), ".csv"))
+      } else {
+        balance_file <- file.path(balance_forgone_folder, 
+                                 paste0("Balance_", res$country_code, "_", res$period, "_", 
+                                       ins_type, ".csv"))
+      }
+      write.csv(bal_df, balance_file, row.names = FALSE)
+    }
+  }
+}
+
+output_file <- file.path(results_folder, "Resultats_COMPLETS_IPTW_avec_Depenses.xlsx")
+writexl::write_xlsx(excel_sheets, output_file)
+cat("\nFichier Excel créé:", output_file, "\n")
+cat("Nombre d'onglets:", length(names(excel_sheets)), "\n")
+cat("Onglets créés:\n")
+for(sheet in names(excel_sheets)) {
+  cat(" -", sheet, "\n")
+}
+```
+
+# 8. Export Word
+
+```{r export-word}
+doc <- read_docx()
+
+doc <- body_add_par(doc, "RESULTATS RENONCIATION AUX SOINS", style = "heading 1")
+if(!is.null(complete_results$summary)) {
+  ft_forgone <- flextable(complete_results$summary) %>%
+    autofit() %>%
+    theme_vanilla()
+  doc <- body_add_flextable(doc, ft_forgone)
+  doc <- body_add_par(doc, "", style = "Normal")
+}
+
+doc <- body_add_par(doc, "RESULTATS DEPENSES DE SANTE", style = "heading 1")
+doc <- body_add_par(doc, 
+  "Effet de l'assurance sur la part des dépenses de santé dans le budget des ménages (parmi les utilisateurs de soins uniquement)",
+  style = "Normal")
+
+if(!is.null(complete_results$expenditure)) {
+  ft_exp <- flextable(complete_results$expenditure) %>%
+    set_header_labels(
+      OOP_Control = "OOP sans assurance (%)",
+      OOP_Treated = "OOP avec assurance (%)",
+      Ratio = "Ratio",
+      Reduction_Pct = "Réduction (%)",
+      Coefficient_pp = "Effet (pp)",
+      CI_Lower = "IC 95% inf",
+      CI_Upper = "IC 95% sup"
+    ) %>%
+    autofit() %>%
+    theme_vanilla()
+  
+  doc <- body_add_flextable(doc, ft_exp)
+  doc <- body_add_par(doc, "", style = "Normal")
+  
+  doc <- body_add_par(doc, 
+    "Note: Ratio < 1 indique une réduction des dépenses. Réduction (%) = (1 - Ratio) × 100",
+    style = "Normal")
+}
+
+doc <- body_add_par(doc, "RESUME EQUILIBRAGE", style = "heading 1")
+if(!is.null(complete_results$balance)) {
+  ft_balance <- flextable(complete_results$balance) %>%
+    autofit() %>%
+    theme_vanilla()
+  doc <- body_add_flextable(doc, ft_balance)
+  doc <- body_add_par(doc, "", style = "Normal")
+}
+
+doc <- body_add_par(doc, "ANALYSE DE SENSIBILITE", style = "heading 1")
+
+if(!is.null(complete_results$sensitivity)) {
+  doc <- body_add_par(doc, "Sensibilité - Renoncement aux soins", style = "heading 2")
+  ft_sens <- flextable(complete_results$sensitivity) %>%
+    autofit() %>%
+    theme_vanilla()
+  doc <- body_add_flextable(doc, ft_sens)
+  doc <- body_add_par(doc, "", style = "Normal")
+}
+
+if(!is.null(complete_results$expenditure_sensitivity)) {
+  doc <- body_add_par(doc, "Sensibilité - Dépenses de santé", style = "heading 2")
+  ft_sens_exp <- flextable(complete_results$expenditure_sensitivity) %>%
+    set_header_labels(
+      Coefficient = "Coefficient (%)",
+      SE = "Erreur-type (%)"
+    ) %>%
+    autofit() %>%
+    theme_vanilla()
+  doc <- body_add_flextable(doc, ft_sens_exp)
+  doc <- body_add_par(doc, "", style = "Normal")
+}
+
+print(doc, target = file.path(results_folder, "Resultats_COMPLETS_IPTW.docx"))
+cat("Document Word créé:", file.path(results_folder, "Resultats_COMPLETS_IPTW.docx"), "\n")
+```
+
+# 9. Visualisations
+
+## 9.1 Graphiques pour les dépenses de santé
+
+```{r plots-expenditure}
+if(!is.null(complete_results$expenditure)) {
+  
+  plot_exp_data <- complete_results$expenditure %>%
+    mutate(
+      Effect_Label = ifelse(Significant == "Yes", 
+                           paste0(sprintf("%.1f", Reduction_Pct), "%***"),
+                           paste0(sprintf("%.1f", Reduction_Pct), "%")),
+      Country_Period = paste(Country, Period)
+    )
+  
+  p_expenditure <- ggplot(plot_exp_data, 
+                         aes(x = Country, y = Reduction_Pct, fill = Insurance_Type)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    geom_text(aes(label = Effect_Label), 
+              position = position_dodge(0.9), 
+              vjust = ifelse(plot_exp_data$Reduction_Pct < 0, 1.2, -0.5),
+              size = 3) +
+    facet_wrap(~ Period, ncol = 2) +
+    labs(
+      title = "Effect of Health Insurance on Out-of-Pocket Health Expenditure Share",
+      subtitle = "Percentage reduction in OOP/Total household expenditure (among care users)",
+      x = "Country",
+      y = "Reduction (%)",
+      fill = "Insurance Type"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "bottom"
+    ) +
+    scale_fill_brewer(palette = "Set2") +
+    scale_y_continuous(limits = c(-60, 20))
+  
+  print(p_expenditure)
+  
+  ggsave(
+    filename = file.path(plots_folder, "Insurance_Effect_on_Expenditure.png"),
+    plot = p_expenditure,
+    width = 12,
+    height = 8,
+    dpi = 300
+  )
+  
+  mean_comparison_data <- complete_results$expenditure %>%
+    select(Country, Period, Insurance_Type, OOP_Control, OOP_Treated, Significant) %>%
+    pivot_longer(cols = c("OOP_Control", "OOP_Treated"),
+                 names_to = "Group",
+                 values_to = "OOP_Share") %>%
+    mutate(
+      Group = factor(Group, 
+                    levels = c("OOP_Control", "OOP_Treated"),
+                    labels = c("Without Insurance", "With Insurance")),
+      Significance = ifelse(Significant == "Yes", "***", "")
+    )
+  
+  p_means <- ggplot(mean_comparison_data,
+                   aes(x = Country, y = OOP_Share, fill = Group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_text(data = mean_comparison_data %>% filter(Group == "With Insurance"),
+              aes(label = Significance), 
+              position = position_dodge(0.9), 
+              vjust = -0.5) +
+    facet_grid(Insurance_Type ~ Period) +
+    labs(
+      title = "Health Expenditure Share by Insurance Status",
+      subtitle = "OOP as % of total household expenditure (among care users)",
+      x = "Country",
+      y = "OOP Share (%)",
+      fill = "Group"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "bottom"
+    ) +
+    scale_fill_manual(values = c("Without Insurance" = "#e74c3c", 
+                                "With Insurance" = "#2ecc71")) +
+    scale_y_continuous(limits = c(0, max(mean_comparison_data$OOP_Share) * 1.1))
+  
+  print(p_means)
+  
+  ggsave(
+    filename = file.path(plots_folder, "Mean_Expenditure_Comparison.png"),
+    plot = p_means,
+    width = 14,
+    height = 10,
+    dpi = 300
+  )
+}
+```
+
+## 9.2 Graphiques d'équilibrage
+
+```{r plots-balance}
+create_balance_plot <- function(balance_table, country, period, insurance_type, 
+                               n_treated, n_control) {
+  
+  balance_data <- data.frame(
+    Variable = rownames(balance_table),
+    SMD_Before = balance_table$Diff.Un,
+    SMD_After = balance_table$Diff.Adj,
+    stringsAsFactors = FALSE
+  ) %>%
+    pivot_longer(cols = c("SMD_Before", "SMD_After"),
+                 names_to = "Timing",
+                 values_to = "SMD") %>%
+    mutate(
+      Timing = factor(Timing, 
+                     levels = c("SMD_Before", "SMD_After"),
+                     labels = c("Avant pondération", "Après pondération")),
+      Variable = factor(Variable, levels = unique(Variable))
+    )
+  
+  p <- ggplot(balance_data, aes(x = SMD, y = Variable, color = Timing)) +
+    geom_point(size = 2, alpha = 0.7) +
+    geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+    geom_vline(xintercept = c(-0.1, 0.1), linetype = "dashed", color = "red") +
+    scale_color_manual(values = c("Avant pondération" = "darkred", 
+                                 "Après pondération" = "darkgreen")) +
+    labs(
+      title = paste(country, "-", period, "-", insurance_type),
+      subtitle = paste("N traités:", n_treated, "| N contrôles:", n_control),
+      x = "Différence standardisée moyenne (SMD)",
+      y = "Variables",
+      color = ""
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10),
+      axis.text.y = element_text(size = 8)
+    ) +
+    xlim(-0.5, 0.5)
+  
+  return(p)
+}
+
+for(key in names(all_results_complete)[1:min(4, length(all_results_complete))]) {
+  res <- all_results_complete[[key]]
+  
+  for(ins_type in names(res$results)[1:min(2, length(res$results))]) {
+    if(!is.null(res$results[[ins_type]]) && 
+       !is.null(res$results[[ins_type]]$balance_table)) {
+      
+      p <- create_balance_plot(
+        balance_table = res$results[[ins_type]]$balance_table,
+        country = res$country,
+        period = res$period,
+        insurance_type = ins_type,
+        n_treated = res$results[[ins_type]]$n_treated,
+        n_control = res$results[[ins_type]]$n_control
+      )
+      
+      if(grepl("expenditure", ins_type)) {
+        filename <- paste0("Balance_", res$country_code, "_", res$period, "_", 
+                          gsub("_expenditure", "", ins_type), ".png")
+        filepath <- file.path(balance_expenditure_folder, filename)
+      } else {
+        filename <- paste0("Balance_", res$country_code, "_", res$period, "_", ins_type, ".png")
+        filepath <- file.path(balance_forgone_folder, filename)
+      }
+      
+      ggsave(
+        filename = filepath,
+        plot = p,
+        width = 8,
+        height = 6,
+        dpi = 300
+      )
+    }
+  }
+}
+
+country_balance_data <- list()
+
+for(key in names(all_results_complete)) {
+  res <- all_results_complete[[key]]
+  country_code <- res$country_code
+  
+  for(ins_type in c("couvmal", "assu_ext", "assu_soc")) {
+    if(!is.null(res$results[[ins_type]]) && !is.null(res$results[[ins_type]]$balance_table)) {
+      
+      bal_table <- res$results[[ins_type]]$balance_table
+      
+      bal_data <- data.frame(
+        Variable = rownames(bal_table),
+        SMD = bal_table$Diff.Adj,
+        Insurance = ins_type,
+        Period = res$period,
+        N = paste0("N=", res$results[[ins_type]]$n_treated)
+      )
+      
+      if(!country_code %in% names(country_balance_data)) {
+        country_balance_data[[country_code]] <- list()
+      }
+      country_balance_data[[country_code]][[paste(ins_type, res$period, sep="_")]] <- bal_data
+    }
+  }
+}
+
+for(country_code in names(country_balance_data)) {
+  
+  country_data_list <- country_balance_data[[country_code]]
+  if(length(country_data_list) == 0) next
+  
+  combined_data <- do.call(rbind, country_data_list)
+  
+  combined_data <- combined_data %>%
+    mutate(
+      Insurance_Label = case_when(
+        Insurance == "couvmal" ~ "All insurance",
+        Insurance == "assu_ext" ~ "Extension schemes",
+        Insurance == "assu_soc" ~ "Social insurance",
+        TRUE ~ Insurance
+      ),
+      Panel = paste(Insurance_Label, Period, sep = "\n")
+    )
+  
+  p_combined <- ggplot(combined_data, aes(x = SMD, y = Variable)) +
+    geom_point(size = 2, color = "darkblue", alpha = 0.7) +
+    geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+    geom_vline(xintercept = c(-0.1, 0.1), linetype = "dashed", color = "red") +
+    facet_wrap(~ Panel, ncol = 3) +
+    labs(
+      title = paste("Balance After IPTW -", countries[[country_code]]$name),
+      subtitle = "Standardized Mean Differences after weighting",
+      x = "SMD",
+      y = "Variables"
+    ) +
+    theme_minimal() +
+    theme(
+      strip.text = element_text(size = 9, face = "bold"),
+      axis.text.y = element_text(size = 7),
+      plot.title = element_text(face = "bold", size = 14)
+    ) +
+    xlim(-0.3, 0.3)
+  
+  ggsave(
+    filename = file.path(balance_forgone_folder, paste0("Balance_Combined_", country_code, "_Forgone.png")),
+    plot
