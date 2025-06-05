@@ -10,8 +10,8 @@ log using "Protection_financiere_UEMOA_2018_2021.log", replace
 global pays_2018 "BEN BFA CIV GNB MLI NER SEN TGO"
 global pays_2021 "ben bfa civ gnb mli ner sen tgo"
 global annees "2018 2021"
-global path_base_2018 "C:\Users\mamad\OneDrive\Documents\Android\CMU\Bibliographie\Senegal\Enquete menages\EHCVM\2018-2019"
-global path_base_2021 "C:\Users\mamad\OneDrive\Documents\Android\CMU\Bibliographie\Senegal\Enquete menages\EHCVM\2021-2022"
+global path_base_2018 "C:\Users\xxxxxx\Enquete menages\EHCVM\2018-2019"
+global path_base_2021 "C:\Users\xxxxxx\Enquete menages\EHCVM\2021-2022"
 
 /*==============================================================================
         SECTION 2: PROGRAMMES DE PRÉPARATION DES DONNÉES
