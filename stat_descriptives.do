@@ -2,7 +2,7 @@ clear all
 set more off
 set dp period
 
-global path_base "C:\Users\mamad\OneDrive\Documents\Android\CMU\Bibliographie\Senegal\Enquete menages\EHCVM"
+global path_base "C:\xxxxx\Senegal\Enquete menages\EHCVM"
 global path_2018 "$path_base\2018-2019"
 global path_2021 "$path_base\2021-2022"
 global path_output "$path_base\Descriptive_Statistics"
