@@ -1,0 +1,800 @@
+use "$path_2018\AUEMOA2018_individus", clear
+
+capture confirm variable impov
+if _rc {
+    gen impov = (immi == 1 | impoor == 1)
+    label var impov "Dépenses appauvrissantes (total)"
+}
+
+save "$path_2018\AUEMOA2018_individus", replace
+
+use "$path_2021\AUEMOA2021_individus", clear
+
+capture confirm variable impov
+if _rc {
+    gen impov = (immi == 1 | impoor == 1)
+    label var impov "Dépenses appauvrissantes (total)"
+}
+
+save "$path_2021\AUEMOA2021_individus", replace
+
+di "Variable impov créée avec succès dans les deux bases de données"
+clear all
+set more off
+capture log close
+
+global path_2018 "C:\Users\mamad\xxxx\Enquete menages\EHCVM\2018-2019"
+global path_2021 "C:\Users\mamad\xxxx\Enquete menages\EHCVM\2021-2022"
+global path_output "C:\Users\mamad\xxxx\Enquete menages\EHCVM\Comparaison"
+
+capture mkdir "$path_output"
+
+capture confirm file "$path_2018\AUEMOA2018_individus.dta"
+if _rc {
+    di as error "Erreur: Le fichier AUEMOA2018_individus.dta n'existe pas dans $path_2018"
+    exit 1
+}
+
+capture confirm file "$path_2021\AUEMOA2021_individus.dta"
+if _rc {
+    di as error "Erreur: Le fichier AUEMOA2021_individus.dta n'existe pas dans $path_2021"
+    exit 1
+}
+
+log using "$path_output\Analyse_UEMOA_complete_unifiee.log", replace
+
+/*==============================================================================
+    SECTION 1: DÉFINITION DES POPULATIONS ET PARAMÈTRES
+==============================================================================*/
+
+local pop_2018_1 = 11940684
+local pop_2018_2 = 20392723
+local pop_2018_3 = 25493989
+local pop_2018_4 = 1924955
+local pop_2018_5 = 19934298
+local pop_2018_6 = 22577058
+local pop_2018_7 = 15574909
+local pop_2018_8 = 8046679
+local pop_total_2018 = 125885294
+
+local pop_2021_1 = 12996895
+local pop_2021_2 = 22100684
+local pop_2021_3 = 27478249
+local pop_2021_4 = 2060721
+local pop_2021_5 = 21904983
+local pop_2021_6 = 25252722
+local pop_2021_7 = 16876720
+local pop_2021_8 = 8644829
+local pop_total_2021 = 137315803
+
+local indicators "non_soinsttfin cata_dtot10 immi impoor impov fp_oms fp_oms_eur couvmal assu_soc assu_ext use_noop"
+local labels `""Renonciation financière" "Dépenses catastrophiques (10%)" "Appauvrissement (aggravation)" "Appauvrissement (pauvreté)" "Dépenses appauvrissantes (total)" "Difficultés totales (OMS)" "Difficultés totales (EUR)" "Couverture assurance (toute)" "Assurance sociale" "Régimes d'extension" "Utilisation sans paiement""'
+
+/*==============================================================================
+    SECTION 2: VÉRIFICATION DES DONNÉES
+==============================================================================*/
+
+di _n "{hline 80}"
+di "VÉRIFICATION DE LA STRUCTURE DES DONNÉES"
+di "{hline 80}" _n
+
+preserve
+quietly use "$path_2018\AUEMOA2018_individus", clear
+quietly count
+local n_2018 = r(N)
+di "Observations 2018: " %10.0fc `n_2018'
+tab pays, missing
+restore
+
+preserve
+quietly use "$path_2021\AUEMOA2021_individus", clear
+quietly count
+local n_2021 = r(N)
+di "Observations 2021: " %10.0fc `n_2021'
+tab pays, missing
+restore
+
+di _n "Total théorique après append: " %10.0fc (`n_2018' + `n_2021')
+
+/*==============================================================================
+    SECTION 3: PROGRAMMES UTILITAIRES
+==============================================================================*/
+
+capture program drop test_by_country
+program define test_by_country, rclass
+    syntax varlist, [save_matrix(string)]
+    
+    local var `varlist'
+    
+    matrix country_results = J(8, 10, .)
+    matrix colnames country_results = rate_2018 se_2018 rate_2021 se_2021 diff se_diff ci_low ci_high pval stars
+    
+    forvalues p = 1/8 {
+        preserve
+        quietly use "$path_2018\AUEMOA2018_individus", clear
+        
+        quietly count
+        if r(N) == 0 {
+            di as error "Erreur: Pas de données pour 2018"
+            exit 1
+        }
+        
+        quietly svyset grappe [pw=hhweight], strata(region)
+        
+        if "`var'" == "non_soinsttfin" {
+            gen `var'_binary = (`var' == 1) if !missing(`var')
+            local varname "`var'_binary"
+        }
+        else if "`var'" == "impov" {
+            capture gen impov = (immi == 1 | impoor == 1)
+            local varname "impov"
+        }
+        else {
+            local varname "`var'"
+        }
+        
+        quietly svy: mean `varname' if pays == `p'
+        matrix temp2018 = r(table)
+        local rate_2018 = temp2018[1,1]
+        local se_2018 = temp2018[2,1]
+        
+        restore
+        
+        preserve
+        quietly use "$path_2021\AUEMOA2021_individus", clear
+        
+        quietly count
+        if r(N) == 0 {
+            di as error "Erreur: Pas de données pour 2021"
+            exit 1
+        }
+        
+        quietly svyset grappe [pw=hhweight], strata(region)
+        
+		if "`var'" == "non_soinsttfin" {
+			gen `var'_binary = (`var' == 1) if !missing(`var')
+			local varname "`var'_binary"
+		}
+		else if "`var'" == "impov" {
+			capture gen impov = (immi == 1 | impoor == 1)
+			local varname "impov"
+		}
+		else {
+			local varname "`var'"
+		}
+        
+        quietly svy: mean `varname' if pays == `p'
+        matrix temp2021 = r(table)
+        local rate_2021 = temp2021[1,1]
+        local se_2021 = temp2021[2,1]
+        
+        restore
+        
+		preserve
+
+		use "$path_2018\AUEMOA2018_individus", clear
+		gen period = 0
+		tempfile temp2018
+		save `temp2018'
+
+		use "$path_2021\AUEMOA2021_individus", clear
+		gen period = 1
+		append using `temp2018'
+
+		if "`var'" == "non_soinsttfin" {
+			gen `var'_binary = (`var' == 1) if !missing(`var')
+			local varname "`var'_binary"
+		}
+		else if "`var'" == "impov" {
+			capture gen impov = (immi == 1 | impoor == 1)
+			local varname "impov"
+		}
+		else {
+			local varname "`var'"
+		}
+
+		keep if pays == `p'
+
+		quietly svyset grappe [pw=hhweight], strata(region)
+        
+        quietly svy: reg `varname' i.period
+        
+        local diff = _b[1.period]
+        local se_diff = _se[1.period]
+        local ci_low = `diff' - 1.96 * `se_diff'
+        local ci_high = `diff' + 1.96 * `se_diff'
+        
+        test 1.period
+        local pval = r(p)
+        
+        restore
+        
+        local stars = 0
+        if `pval' < 0.05 local stars = 1
+        if `pval' < 0.01 local stars = 2
+        if `pval' < 0.001 local stars = 3
+        
+        matrix country_results[`p',1] = `rate_2018'
+        matrix country_results[`p',2] = `se_2018'
+        matrix country_results[`p',3] = `rate_2021'
+        matrix country_results[`p',4] = `se_2021'
+        matrix country_results[`p',5] = `diff'
+        matrix country_results[`p',6] = `se_diff'
+        matrix country_results[`p',7] = `ci_low'
+        matrix country_results[`p',8] = `ci_high'
+        matrix country_results[`p',9] = `pval'
+        matrix country_results[`p',10] = `stars'
+    }
+    
+    if "`save_matrix'" != "" {
+        matrix `save_matrix' = country_results
+    }
+    
+    return matrix results = country_results
+end
+
+/*==============================================================================
+    SECTION 4: CALCUL DES MOYENNES UEMOA
+==============================================================================*/
+
+di _n "{hline 80}"
+di "CALCUL DES MOYENNES UEMOA - MÉTHODOLOGIE CORRECTE"
+di "{hline 80}" _n
+
+local n_ind : word count `indicators'
+matrix uemoa_results = J(`n_ind', 8, .)
+matrix colnames uemoa_results = n_2018 rate_2018 se_2018 n_2021 rate_2021 se_2021 diff_n diff_rate
+matrix rownames uemoa_results = `indicators'
+
+matrix test_results = J(`n_ind', 4, .)
+matrix colnames test_results = diff se t_stat p_value
+matrix rownames test_results = `indicators'
+
+local row = 1
+foreach var of local indicators {
+    local label : word `row' of `labels'
+    di _n "Analyse de: `label'" _n
+    
+    quietly use "$path_2018\AUEMOA2018_individus", clear
+    quietly svyset grappe [pw=hhweight], strata(region)
+    
+    if "`var'" == "non_soinsttfin" {
+        gen `var'_binary = (`var' == 1) if !missing(`var')
+        local varname "`var'_binary"
+    }
+    else if "`var'" == "impov" {
+        capture gen impov = (immi == 1 | impoor == 1)
+        local varname "impov"
+    }
+    else {
+        local varname "`var'"
+    }
+    
+    local total_2018 = 0
+    local variance_2018 = 0
+    
+    if `row' == 1 {
+        di "  2018/2019 - Détail par pays:"
+    }
+    
+    forvalues p = 1/8 {
+        quietly svy: mean `varname' if pays == `p'
+        matrix temp = r(table)
+        local rate = temp[1,1]
+        local se = temp[2,1]
+        local pop = `pop_2018_`p''
+        local n_affected = `rate' * `pop'
+        local total_2018 = `total_2018' + `n_affected'
+        
+        local variance_2018 = `variance_2018' + (`se' * `pop')^2
+        
+        if "`var'" == "non_soinsttfin" {
+            local country_name = ""
+            if `p' == 1 local country_name = "Bénin"
+            if `p' == 2 local country_name = "Burkina Faso"
+            if `p' == 3 local country_name = "Côte d'Ivoire"
+            if `p' == 4 local country_name = "Guinée-Bissau"
+            if `p' == 5 local country_name = "Mali"
+            if `p' == 6 local country_name = "Niger"
+            if `p' == 7 local country_name = "Sénégal"
+            if `p' == 8 local country_name = "Togo"
+            
+            di "    `country_name': " %5.1f (`rate'*100) "% × " %10.0fc `pop' " = " %10.0fc `n_affected'
+        }
+    }
+    
+    local rate_2018 = `total_2018' / `pop_total_2018'
+    local se_2018 = sqrt(`variance_2018') / `pop_total_2018'
+    
+    if `row' == 1 {
+        di "    Total 2018: " %12.0fc `total_2018' " / " %12.0fc `pop_total_2018' " = " %5.2f (`rate_2018'*100) "%"
+    }
+    
+	quietly use "$path_2021\AUEMOA2021_individus", clear
+	quietly svyset grappe [pw=hhweight], strata(region)
+
+	if "`var'" == "non_soinsttfin" {
+		gen `var'_binary = (`var' == 1) if !missing(`var')
+		local varname "`var'_binary"
+	}
+	else if "`var'" == "impov" {
+		capture gen impov = (immi == 1 | impoor == 1)
+		local varname "impov"
+	}
+	else {
+		local varname "`var'"
+	}
+    
+    local total_2021 = 0
+    local variance_2021 = 0
+    
+    if `row' == 1 {
+        di _n "  2021/2022 - Détail par pays:"
+    }
+    
+    forvalues p = 1/8 {
+        quietly svy: mean `varname' if pays == `p'
+        matrix temp = r(table)
+        local rate = temp[1,1]
+        local se = temp[2,1]
+        local pop = `pop_2021_`p''
+        local n_affected = `rate' * `pop'
+        local total_2021 = `total_2021' + `n_affected'
+        
+        local variance_2021 = `variance_2021' + (`se' * `pop')^2
+        
+        if "`var'" == "non_soinsttfin" {
+            local country_name = ""
+            if `p' == 1 local country_name = "Bénin"
+            if `p' == 2 local country_name = "Burkina Faso"
+            if `p' == 3 local country_name = "Côte d'Ivoire"
+            if `p' == 4 local country_name = "Guinée-Bissau"
+            if `p' == 5 local country_name = "Mali"
+            if `p' == 6 local country_name = "Niger"
+            if `p' == 7 local country_name = "Sénégal"
+            if `p' == 8 local country_name = "Togo"
+            
+            di "    `country_name': " %5.1f (`rate'*100) "% × " %10.0fc `pop' " = " %10.0fc `n_affected'
+        }
+    }
+    
+    local rate_2021 = `total_2021' / `pop_total_2021'
+    local se_2021 = sqrt(`variance_2021') / `pop_total_2021'
+    
+    if `row' == 1 {
+        di "    Total 2021: " %12.0fc `total_2021' " / " %12.0fc `pop_total_2021' " = " %5.2f (`rate_2021'*100) "%"
+    }
+    
+    quietly use "$path_2018\AUEMOA2018_individus", clear
+    gen period = 0
+    tempfile temp2018
+    quietly save `temp2018'
+    
+    quietly use "$path_2021\AUEMOA2021_individus", clear
+    gen period = 1
+    quietly append using `temp2018'
+    
+    quietly svyset grappe [pw=hhweight], strata(region)
+    
+	if "`var'" == "non_soinsttfin" {
+		gen `var'_binary = (`var' == 1) if !missing(`var')
+		local varname "`var'_binary"
+	}
+	else if "`var'" == "impov" {
+		capture gen impov = (immi == 1 | impoor == 1)
+		local varname "impov"
+	}
+	else {
+		local varname "`var'"
+	}
+    
+    quietly svy: reg `varname' i.period
+    
+    matrix test_results[`row',1] = _b[1.period]
+    matrix test_results[`row',2] = _se[1.period]
+    matrix test_results[`row',3] = _b[1.period]/_se[1.period]
+    test 1.period
+    matrix test_results[`row',4] = r(p)
+    
+    matrix uemoa_results[`row',1] = `total_2018'
+    matrix uemoa_results[`row',2] = `rate_2018' * 100
+    matrix uemoa_results[`row',3] = `se_2018' * 100
+    matrix uemoa_results[`row',4] = `total_2021'
+    matrix uemoa_results[`row',5] = `rate_2021' * 100
+    matrix uemoa_results[`row',6] = `se_2021' * 100
+    matrix uemoa_results[`row',7] = `total_2021' - `total_2018'
+    matrix uemoa_results[`row',8] = (`rate_2021' - `rate_2018') * 100
+    
+    di _n "  Résumé `label':"
+    di "    2018: " %5.2f (`rate_2018'*100) "% (SE: " %3.2f (`se_2018'*100) ")"
+    di "    2021: " %5.2f (`rate_2021'*100) "% (SE: " %3.2f (`se_2021'*100) ")"
+    
+    local evolution = (`rate_2021' - `rate_2018') * 100
+    if `evolution' >= 0 {
+        di "    Évolution: +" %5.2f abs(`evolution') " points de pourcentage"
+    }
+    else {
+        di "    Évolution: -" %5.2f abs(`evolution') " points de pourcentage"
+    }
+    
+    local row = `row' + 1
+}
+
+/*==============================================================================
+    SECTION 4: TABLEAU RÉCAPITULATIF UEMOA
+==============================================================================*/
+
+di _n "{hline 120}"
+di "TABLEAU RÉCAPITULATIF - ÉVOLUTION DES INDICATEURS DE PROTECTION FINANCIÈRE UEMOA"
+di "{hline 120}"
+di "Indicateur" _col(35) "2018/2019" _col(48) "SE" _col(56) "2021/2022" _col(69) "SE" _col(77) "Évolution" _col(90) "SE Diff" _col(100) "p-value"
+di _col(37) "(%)" _col(50) "(%)" _col(58) "(%)" _col(71) "(%)" _col(79) "(pp)" _col(92) "(pp)"
+di "{hline 120}"
+
+local row = 1
+foreach var of local indicators {
+    local label : word `row' of `labels'
+    local rate_2018 = uemoa_results[`row',2]
+    local se_2018 = uemoa_results[`row',3]
+    local rate_2021 = uemoa_results[`row',5]
+    local se_2021 = uemoa_results[`row',6]
+    local diff = uemoa_results[`row',8]
+    local se_diff = test_results[`row',2] * 100
+    local pval = test_results[`row',4]
+    
+    local stars = ""
+    if `pval' < 0.001 local stars = "***"
+    else if `pval' < 0.01 local stars = "**"
+    else if `pval' < 0.05 local stars = "*"
+    
+    if `diff' >= 0 {
+        di "`label'" _col(35) %5.1f `rate_2018' _col(48) %3.1f `se_2018' ///
+           _col(56) %5.1f `rate_2021' _col(69) %3.1f `se_2021' ///
+           _col(77) "+" %4.1f abs(`diff') _col(90) %3.1f `se_diff' ///
+           _col(100) %6.4f `pval' " `stars'"
+    }
+    else {
+        di "`label'" _col(35) %5.1f `rate_2018' _col(48) %3.1f `se_2018' ///
+           _col(56) %5.1f `rate_2021' _col(69) %3.1f `se_2021' ///
+           _col(77) "-" %4.1f abs(`diff') _col(90) %3.1f `se_diff' ///
+           _col(100) %6.4f `pval' " `stars'"
+    }
+    
+    local row = `row' + 1
+}
+
+di "{hline 120}"
+di "pp: points de pourcentage; * p<0.05; ** p<0.01; *** p<0.001"
+
+/*==============================================================================
+    SECTION 5: ANALYSE DÉTAILLÉE PAR PAYS
+==============================================================================*/
+
+di _n "{hline 80}"
+di "ANALYSE DÉTAILLÉE PAR PAYS"
+di "{hline 80}" _n
+
+local main_indicators "non_soinsttfin cata_dtot10 impov fp_oms_eur couvmal assu_soc assu_ext"
+local main_labels `""Renonciation financière" "Dépenses catastrophiques" "Dépenses appauvrissantes (total)" "Difficultés totales" "Couverture assurance (toute)" "Assurance sociale" "Régimes d'extension""'
+
+local i = 1
+foreach var of local main_indicators {
+    local label : word `i' of `main_labels'
+    
+    di _n "{hline 120}"
+    di "`label'"
+    di "{hline 120}"
+    di "Pays" _col(20) "2018/2019" _col(35) "SE" _col(45) "2021/2022" _col(60) "SE" ///
+       _col(70) "Diff (pp)" _col(85) "SE Diff" _col(95) "IC 95%" _col(110) "p-value"
+    di _col(23) "(%)" _col(48) "(%)" _col(72) "(%)" _col(95) "Diff"
+    di "{hline 120}"
+    
+    test_by_country `var', save_matrix(`var'_country)
+    
+    forvalues p = 1/8 {
+        local country_name = ""
+        if `p' == 1 local country_name = "Bénin"
+        if `p' == 2 local country_name = "Burkina Faso"
+        if `p' == 3 local country_name = "Côte d'Ivoire"
+        if `p' == 4 local country_name = "Guinée-Bissau"
+        if `p' == 5 local country_name = "Mali"
+        if `p' == 6 local country_name = "Niger"
+        if `p' == 7 local country_name = "Sénégal"
+        if `p' == 8 local country_name = "Togo"
+        
+		matrix temp_country = `var'_country
+		local r2018 = temp_country[`p',1] * 100
+		local se2018 = temp_country[`p',2] * 100
+		local r2021 = temp_country[`p',3] * 100
+		local se2021 = temp_country[`p',4] * 100
+		local diff = temp_country[`p',5] * 100
+		local se_diff = temp_country[`p',6] * 100
+		local ci_low = temp_country[`p',7] * 100
+		local ci_high = temp_country[`p',8] * 100
+		local pval = temp_country[`p',9]
+		local stars_n = temp_country[`p',10]
+        
+        local stars = ""
+        if `stars_n' == 3 local stars = "***"
+        else if `stars_n' == 2 local stars = "**"
+        else if `stars_n' == 1 local stars = "*"
+        
+        if `diff' >= 0 {
+            di "`country_name'" _col(20) %5.1f `r2018' _col(35) "(" %3.1f `se2018' ")" ///
+               _col(45) %5.1f `r2021' _col(60) "(" %3.1f `se2021' ")" ///
+               _col(70) "+" %5.1f abs(`diff') _col(85) "(" %3.1f `se_diff' ")" ///
+               _col(95) "[" %5.1f `ci_low' ", " %5.1f `ci_high' "]" ///
+               _col(110) %6.4f `pval' " `stars'"
+        }
+        else {
+            di "`country_name'" _col(20) %5.1f `r2018' _col(35) "(" %3.1f `se2018' ")" ///
+               _col(45) %5.1f `r2021' _col(60) "(" %3.1f `se2021' ")" ///
+               _col(70) "-" %5.1f abs(`diff') _col(85) "(" %3.1f `se_diff' ")" ///
+               _col(95) "[" %5.1f `ci_low' ", " %5.1f `ci_high' "]" ///
+               _col(110) %6.4f `pval' " `stars'"
+        }
+    }
+    
+    di "{hline 120}"
+    di "* p<0.05; ** p<0.01; *** p<0.001"
+    
+    local i = `i' + 1
+}
+
+/*==============================================================================
+    SECTION 6: EXPORT EXCEL COMPLET
+==============================================================================*/
+
+di _n "Création des fichiers Excel..." _n
+
+clear
+set obs `n_ind'
+
+gen indicator = ""
+gen label = ""
+gen n_2018 = .
+gen rate_2018 = .
+gen se_2018 = .
+gen n_2021 = .
+gen rate_2021 = .
+gen se_2021 = .
+gen diff_n = .
+gen diff_pp = .
+gen diff_pct = .
+gen se_diff = .
+gen p_value = .
+gen significance = ""
+
+local row = 1
+foreach var of local indicators {
+    local lab : word `row' of `labels'
+    
+    replace indicator = "`var'" in `row'
+    replace label = "`lab'" in `row'
+    replace n_2018 = round(uemoa_results[`row',1]) in `row'
+    replace rate_2018 = uemoa_results[`row',2] in `row'
+    replace se_2018 = uemoa_results[`row',3] in `row'
+    replace n_2021 = round(uemoa_results[`row',4]) in `row'
+    replace rate_2021 = uemoa_results[`row',5] in `row'
+    replace se_2021 = uemoa_results[`row',6] in `row'
+    replace diff_n = round(uemoa_results[`row',7]) in `row'
+    replace diff_pp = uemoa_results[`row',8] in `row'
+    replace se_diff = test_results[`row',2] * 100 in `row'
+    
+    if rate_2018[`row'] > 0 {
+        replace diff_pct = (rate_2021[`row'] - rate_2018[`row']) / rate_2018[`row'] * 100 in `row'
+    }
+    
+    replace p_value = test_results[`row',4] in `row'
+    
+    if p_value[`row'] < 0.001 replace significance = "***" in `row'
+    else if p_value[`row'] < 0.01 replace significance = "**" in `row'
+    else if p_value[`row'] < 0.05 replace significance = "*" in `row'
+    else replace significance = "ns" in `row'
+    
+    local row = `row' + 1
+}
+
+format n_2018 n_2021 diff_n %12.0fc
+format rate_* se_* diff_pp se_diff %5.1f
+format diff_pct %6.1f
+format p_value %6.4f
+
+label var indicator "Code"
+label var label "Indicateur"
+label var n_2018 "Nombre affecté 2018"
+label var rate_2018 "Taux 2018 (%)"
+label var se_2018 "SE 2018 (%)"
+label var n_2021 "Nombre affecté 2021"
+label var rate_2021 "Taux 2021 (%)"
+label var se_2021 "SE 2021 (%)"
+label var diff_n "Différence (nombre)"
+label var diff_pp "Différence (pp)"
+label var diff_pct "Évolution (%)"
+label var se_diff "SE Diff (pp)"
+label var p_value "Valeur p"
+label var significance "Significativité"
+
+save "$path_output\temp_indicators.dta", replace
+
+export excel using "$path_output\Analyse_Complete_UEMOA_2018_2021.xlsx", ///
+    sheet("Indicateurs_UEMOA") sheetreplace firstrow(varlabels)
+
+clear
+set obs 56
+
+gen indicator = ""
+gen country = ""
+gen rate_2018 = .
+gen se_2018 = .
+gen rate_2021 = .
+gen se_2021 = .
+gen diff = .
+gen se_diff = .
+gen ci_low = .
+gen ci_high = .
+gen p_value = .
+gen significance = ""
+
+local row = 1
+local ind_num = 1
+foreach var of local main_indicators {
+    local title : word `ind_num' of `main_labels'
+    
+    forvalues p = 1/8 {
+        local country_name = ""
+        if `p' == 1 local country_name = "Bénin"
+        if `p' == 2 local country_name = "Burkina Faso"
+        if `p' == 3 local country_name = "Côte d'Ivoire"
+        if `p' == 4 local country_name = "Guinée-Bissau"
+        if `p' == 5 local country_name = "Mali"
+        if `p' == 6 local country_name = "Niger"
+        if `p' == 7 local country_name = "Sénégal"
+        if `p' == 8 local country_name = "Togo"
+        
+		matrix temp_mat = `var'_country
+        replace indicator = "`title'" in `row'
+        replace country = "`country_name'" in `row'
+        replace rate_2018 = temp_mat[`p',1] * 100 in `row'
+        replace se_2018 = temp_mat[`p',2] * 100 in `row'
+        replace rate_2021 = temp_mat[`p',3] * 100 in `row'
+        replace se_2021 = temp_mat[`p',4] * 100 in `row'
+        replace diff = temp_mat[`p',5] * 100 in `row'
+        replace se_diff = temp_mat[`p',6] * 100 in `row'
+        replace ci_low = temp_mat[`p',7] * 100 in `row'
+        replace ci_high = temp_mat[`p',8] * 100 in `row'
+        replace p_value = temp_mat[`p',9] in `row'
+        
+        local stars_n = temp_mat[`p',10]
+        if `stars_n' == 3 replace significance = "***" in `row'
+        else if `stars_n' == 2 replace significance = "**" in `row'
+        else if `stars_n' == 1 replace significance = "*" in `row'
+        else replace significance = "" in `row'
+        
+        local row = `row' + 1
+    }
+    local ind_num = `ind_num' + 1
+}
+
+format rate_* se_* diff ci_* %5.1f
+format p_value %6.4f
+
+export excel using "$path_output\Analyse_Complete_UEMOA_2018_2021.xlsx", ///
+    sheet("Comparaison_pays") sheetmodify firstrow(variables)
+
+local ind_num = 1
+foreach var of local main_indicators {
+    local title : word `ind_num' of `main_labels'
+    
+    preserve
+    keep if indicator == "`title'"
+    
+    gen evolution = ""
+    forvalues i = 1/`=_N' {
+        if diff[`i'] >= 0 {
+            replace evolution = "+" + string(diff[`i'], "%5.1f") + significance[`i'] in `i'
+        }
+        else {
+            replace evolution = string(diff[`i'], "%5.1f") + significance[`i'] in `i'
+        }
+    }
+    
+    gen trend = ""
+    replace trend = "↗ Augmentation" if diff > 0 & p_value < 0.05
+    replace trend = "↘ Diminution" if diff < 0 & p_value < 0.05
+    replace trend = "→ Stable" if p_value >= 0.05
+    
+    gen taux_2018_formatted = string(rate_2018, "%5.1f") + " (" + string(se_2018, "%3.1f") + ")"
+    gen taux_2021_formatted = string(rate_2021, "%5.1f") + " (" + string(se_2021, "%3.1f") + ")"
+    gen ic_95 = "[" + string(ci_low, "%5.1f") + ", " + string(ci_high, "%5.1f") + "]"
+    
+    export excel country taux_2018_formatted taux_2021_formatted evolution ic_95 p_value trend using ///
+        "$path_output\Analyse_Complete_UEMOA_2018_2021.xlsx", ///
+        sheet("`var'") sheetmodify firstrow(variables)
+    
+    restore
+    local ind_num = `ind_num' + 1
+}
+
+/*==============================================================================
+    SECTION 7: GRAPHIQUES
+==============================================================================*/
+
+use "$path_output\temp_indicators.dta", clear
+keep if inlist(indicator, "non_soinsttfin", "cata_dtot10", "fp_oms_eur", "couvmal")
+
+keep label rate_2018 rate_2021
+gen id = _n
+rename label indicator_label
+
+graph bar rate_2018 rate_2021, over(id, relabel(1 "Renonciation" 2 "Dép. cata." 3 "Diff. totales" 4 "Assurance") label(angle(45))) ///
+    ytitle("Pourcentage (%)") ///
+    title("Évolution des indicateurs clés de protection financière - UEMOA") ///
+    subtitle("2018/2019 vs 2021/2022") ///
+    legend(label(1 "2018/2019") label(2 "2021/2022")) ///
+    bar(1, color(navy)) bar(2, color(maroon))
+
+graph export "$path_output\evolution_indicateurs_cles_UEMOA.png", replace
+
+clear
+set obs 8
+gen pays = _n
+gen country = ""
+replace country = "BEN" if pays == 1
+replace country = "BFA" if pays == 2
+replace country = "CIV" if pays == 3
+replace country = "GNB" if pays == 4
+replace country = "MLI" if pays == 5
+replace country = "NER" if pays == 6
+replace country = "SEN" if pays == 7
+replace country = "TGO" if pays == 8
+
+gen rate_2018 = .
+gen rate_2021 = .
+forvalues p = 1/8 {
+	matrix temp_mat = non_soinsttfin_country
+    replace rate_2018 = temp_mat[`p',1] * 100 in `p'
+    replace rate_2021 = temp_mat[`p',3] * 100 in `p'
+}
+
+graph bar rate_2018 rate_2021, over(country) ///
+    ytitle("Taux de renonciation (%)") ///
+    title("Renonciation aux soins pour raisons financières par pays") ///
+    subtitle("Comparaison 2018/2019 - 2021/2022") ///
+    legend(label(1 "2018/2019") label(2 "2021/2022")) ///
+    bar(1, color(navy)) bar(2, color(maroon))
+
+graph export "$path_output\renonciation_par_pays.png", replace
+
+/*==============================================================================
+    SECTION 8: RAPPORT FINAL
+==============================================================================*/
+
+di _n "{hline 80}"
+di "ANALYSE TERMINÉE AVEC SUCCÈS"
+di "{hline 80}" _n
+
+di "Fichiers créés:"
+di "1. Excel: $path_output\Analyse_Complete_UEMOA_2018_2021.xlsx"
+di "   - Feuille 'Indicateurs_UEMOA': Résultats agrégés avec SE et tests"
+di "   - Feuille 'Comparaison_pays': Tous les pays et indicateurs principaux"
+di "   - Feuilles séparées par indicateur pour faciliter la lecture"
+di ""
+di "2. Graphiques:"
+di "   - evolution_indicateurs_cles_UEMOA.png"
+di "   - renonciation_par_pays.png"
+di ""
+di "3. Log: Analyse_UEMOA_complete_unifiee.log"
+
+di _n "Principaux résultats UEMOA:"
+di "- Renonciation financière: " %4.1f uemoa_results[1,2] "% → " %4.1f uemoa_results[1,5] "%"
+di "- Dépenses catastrophiques: " %4.1f uemoa_results[2,2] "% → " %4.1f uemoa_results[2,5] "%"
+di "- Appauvrissement (aggravation): " %4.1f uemoa_results[3,2] "% → " %4.1f uemoa_results[3,5] "%"
+di "- Appauvrissement (pauvreté): " %4.1f uemoa_results[4,2] "% → " %4.1f uemoa_results[4,5] "%"
+di "- Appauvrissement total: " %4.1f uemoa_results[5,2] "% → " %4.1f uemoa_results[5,5] "%"
+di "- Difficultés totales (EUR): " %4.1f uemoa_results[7,2] "% → " %4.1f uemoa_results[7,5] "%"
+di "- Couverture assurance: " %4.1f uemoa_results[8,2] "% → " %4.1f uemoa_results[8,5] "%"
+
+capture erase "$path_output\temp_indicators.dta"
+
+log close
