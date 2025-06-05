@@ -1,0 +1,523 @@
+---
+title: "Analyse des Indices de Concentration - UEMOA"
+author: "Analyse de l'équité en santé"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+options(scipen = 999)
+```
+
+# 1. Configuration et chargement des packages
+
+```{r packages}
+library(haven)
+library(dplyr)
+library(tidyr)
+library(writexl)
+library(officer)
+library(flextable)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+
+packages_needed <- c("haven", "dplyr", "tidyr", "writexl", 
+                     "officer", "flextable", "ggplot2", 
+                     "knitr", "kableExtra")
+
+for(pkg in packages_needed) {
+  if(!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}
+```
+
+```{r configuration}
+base_path <- "C:/Users/mamad/OneDrive/Documents/Android/CMU/Bibliographie/Senegal/Enquete menages/EHCVM"
+
+results_folder <- paste0("Resultats_CI_", Sys.Date())
+dir.create(results_folder, showWarnings = FALSE)
+
+countries <- c("BEN", "BFA", "CIV", "GNB", "MLI", "NER", "SEN", "TGO")
+country_names <- c("Benin", "Burkina Faso", "Côte d'Ivoire", "Guinea-Bissau", 
+                   "Mali", "Niger", "Senegal", "Togo")
+
+periods <- c("2018", "2021")
+period_labels <- c("2018/2019", "2021/2022")
+
+variables <- c("non_soinsttfin", "cata_dtot10", "couvmal", "assu_ext", "assu_soc")
+var_labels <- c(
+  "Foregone care for financial reasons CI",
+  "Catastrophic healthcare expenditure CI",
+  "All health coverage schemes CI",
+  "Extended health coverage schemes CI",
+  "Social (employment-related) or private health insurance schemes CI"
+)
+
+cat("Configuration terminée. Dossier de résultats:", results_folder, "\n")
+```
+
+# 2. Fonctions de calcul
+
+## 2.1 Fonction de calcul de l'indice de concentration
+
+```{r concentration_index_function}
+calculate_concentration_index <- function(data, var_name, ses = "pcexp", weight = "hhweight") {
+  
+  df <- data %>%
+    select(all_of(c(var_name, ses, weight))) %>%
+    filter(complete.cases(.)) %>%
+    arrange(!!sym(ses))
+  
+  if(nrow(df) < 30) return(list(ci = NA, se = NA, p_value = NA, n = NA))
+  
+  y <- df[[var_name]]
+  w <- df[[weight]]
+  n <- length(y)
+  
+  cumw <- cumsum(w)
+  totalw <- sum(w)
+  R <- (c(0, cumw[-n]) + cumw) / (2 * totalw)
+  
+  mu <- sum(w * y) / totalw
+  
+  CI <- (2 / mu) * sum(w * y * R) / totalw - 1
+  
+  set.seed(12345)
+  n_boot <- 200
+  ci_boot <- numeric(n_boot)
+  
+  for(i in 1:n_boot) {
+    idx <- sample(1:n, n, replace = TRUE)
+    boot_data <- df[idx, ] %>% arrange(!!sym(ses))
+    
+    y_b <- boot_data[[var_name]]
+    w_b <- boot_data[[weight]]
+    
+    cumw_b <- cumsum(w_b)
+    totalw_b <- sum(w_b)
+    R_b <- (c(0, cumw_b[-length(y_b)]) + cumw_b) / (2 * totalw_b)
+    mu_b <- sum(w_b * y_b) / totalw_b
+    
+    if(mu_b > 0) {
+      ci_boot[i] <- (2 / mu_b) * sum(w_b * y_b * R_b) / totalw_b - 1
+    }
+  }
+  
+  se <- sd(ci_boot, na.rm = TRUE)
+  t_stat <- CI / se
+  p_value <- 2 * pnorm(-abs(t_stat))
+  
+  return(list(
+    ci = round(CI, 4),
+    se = round(se, 4),
+    p_value = p_value,
+    n = n,
+    prevalence = mu
+  ))
+}
+```
+
+## 2.2 Fonction principale d'analyse
+
+```{r analysis_function}
+analyze_all_countries <- function() {
+  
+  all_results <- list()
+  detailed_results <- data.frame()
+  
+  cat("\n=== DÉBUT DE L'ANALYSE ===\n")
+  
+  for(v in 1:length(variables)) {
+    var_name <- variables[v]
+    var_label <- var_labels[v]
+    
+    result_table <- data.frame(Year = period_labels, stringsAsFactors = FALSE)
+    
+    cat("\n\nAnalyse:", var_label, "\n")
+    
+    for(c in 1:length(countries)) {
+      country_code <- countries[c]
+      country_name <- country_names[c]
+      country_values <- character(2)
+      
+      for(p in 1:length(periods)) {
+        period <- periods[p]
+        period_folder <- ifelse(period == "2018", "2018-2019", "2021-2022")
+        
+        file_path <- file.path(base_path, period_folder, "interm",
+                              paste0("A", country_code, period, "_individus_assu.dta"))
+        
+        if(file.exists(file_path)) {
+          data <- read_dta(file_path)
+          
+          if(var_name %in% names(data)) {
+            
+            if(var_name == "non_soinsttfin") {
+              data$non_soinsttfin_original <- data$non_soinsttfin
+              data$non_soinsttfin <- as.numeric(data$non_soinsttfin == 1)
+              
+              n_total <- sum(!is.na(data$non_soinsttfin_original))
+              n_financial <- sum(data$non_soinsttfin, na.rm = TRUE)
+              pct_financial <- round(100 * n_financial / n_total, 1)
+              
+              cat("  ", country_name, "-", period, ": ", 
+                  n_financial, "/", n_total, " (", pct_financial, "%) renoncent pour raisons financières\n", sep = "")
+              
+            } else {
+              data[[var_name]] <- as.numeric(data[[var_name]] == 1)
+            }
+            
+            result <- calculate_concentration_index(data, var_name)
+            
+            if(!is.na(result$ci)) {
+              ci_formatted <- sprintf("%.4f", result$ci)
+              if(result$p_value < 0.001) ci_formatted <- paste0(ci_formatted, "***")
+              else if(result$p_value < 0.01) ci_formatted <- paste0(ci_formatted, "**")
+              else if(result$p_value < 0.05) ci_formatted <- paste0(ci_formatted, "*")
+              
+              country_values[p] <- ci_formatted
+              
+              detailed_results <- rbind(detailed_results, data.frame(
+                Country = country_name,
+                Period = period_labels[p],
+                Indicator = var_label,
+                N = result$n,
+                Prevalence_pct = round(result$prevalence * 100, 1),
+                CI = result$ci,
+                SE = result$se,
+                p_value = result$p_value,
+                Significant = ifelse(result$p_value < 0.05, "Yes", "No")
+              ))
+            } else {
+              country_values[p] <- "-"
+            }
+          } else {
+            country_values[p] <- "-"
+            cat("  ", country_name, "-", period, ": Variable non trouvée\n", sep = "")
+          }
+        } else {
+          country_values[p] <- "-"
+        }
+      }
+      
+      result_table[[country_name]] <- country_values
+    }
+    
+    all_results[[var_label]] <- result_table
+  }
+  
+  return(list(tables = all_results, details = detailed_results))
+}
+```
+
+# 3. Exécution de l'analyse
+
+```{r run_analysis}
+results <- analyze_all_countries()
+```
+
+# 4. Création des tableaux
+
+## 4.1 Affichage des résultats principaux
+
+```{r display_results}
+for(indicator_name in names(results$tables)) {
+  cat("\n\n### ", indicator_name, "\n")
+  
+  print(kable(results$tables[[indicator_name]], 
+              caption = indicator_name,
+              align = 'c') %>%
+        kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                      full_width = FALSE))
+}
+```
+
+## 4.2 Statistiques détaillées
+
+```{r detailed_stats}
+cat("\n### Statistiques détaillées\n")
+
+results$details %>%
+  head(20) %>%
+  kable(caption = "Statistiques détaillées (échantillon)",
+        digits = c(0, 0, 0, 0, 1, 4, 4, 4, 0)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE,
+                font_size = 12)
+```
+
+# 5. Export des résultats
+
+## 5.1 Document Word
+
+```{r export_word}
+doc <- read_docx()
+
+doc <- body_add_par(doc, 
+  "Table 3: Concentration index of financial hardship and health coverage in UEMOA, 2018/2019 and 2021/2022",
+  style = "heading 1")
+
+doc <- body_add_par(doc, 
+  "Note: Concentration indices measure inequality in the distribution of health outcomes across socioeconomic groups. Negative values indicate pro-poor concentration (poor more affected), positive values indicate pro-rich concentration (rich more affected). Statistical significance: *** p<0.001, ** p<0.01, * p<0.05. Foregone care for financial reasons captures only financial barriers to healthcare (excluding other reasons such as distance, quality, etc.).",
+  style = "Normal")
+
+doc <- body_add_par(doc, "", style = "Normal")
+
+for(indicator_name in names(results$tables)) {
+  
+  doc <- body_add_par(doc, indicator_name, style = "heading 2")
+  
+  ft <- flextable(results$tables[[indicator_name]])
+  ft <- ft %>%
+    theme_vanilla() %>%
+    autofit() %>%
+    align(align = "center", part = "all") %>%
+    bg(bg = "#E8E8E8", part = "header") %>%
+    bold(part = "header")
+  
+  doc <- body_add_flextable(doc, ft)
+  doc <- body_add_par(doc, "", style = "Normal")
+}
+
+print(doc, target = file.path(results_folder, "Table3_Concentration_Indices.docx"))
+cat("Document Word créé:", file.path(results_folder, "Table3_Concentration_Indices.docx"), "\n")
+```
+
+## 5.2 Fichier Excel
+
+```{r export_excel}
+excel_combined <- data.frame()
+for(indicator_name in names(results$tables)) {
+  df <- results$tables[[indicator_name]]
+  df$Indicator <- indicator_name
+  df <- df[, c("Indicator", names(df)[-ncol(df)])]
+  excel_combined <- rbind(excel_combined, df)
+}
+
+write_xlsx(
+  list(
+    "Table 3" = excel_combined,
+    "Detailed Statistics" = results$details
+  ),
+  path = file.path(results_folder, "Table3_Concentration_Indices.xlsx")
+)
+
+cat("Fichier Excel créé:", file.path(results_folder, "Table3_Concentration_Indices.xlsx"), "\n")
+```
+
+# 6. Visualisations
+
+## 6.1 Graphique d'ensemble
+
+```{r plot_overview, fig.width=12, fig.height=10}
+plot_data <- results$details %>%
+  filter(!is.na(CI))
+
+p_overview <- ggplot(plot_data, aes(x = Country, y = CI, fill = Period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  facet_wrap(~ Indicator, ncol = 2, scales = "free_y") +
+  labs(
+    title = "Concentration Indices for Health Equity in UEMOA",
+    subtitle = "Negative values = pro-poor inequality; Positive values = pro-rich inequality",
+    x = "",
+    y = "Concentration Index",
+    fill = "Period"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    legend.position = "bottom",
+    strip.text = element_text(size = 9, face = "bold")
+  ) +
+  scale_fill_manual(values = c("2018/2019" = "#2E86AB", "2021/2022" = "#A23B72"))
+
+print(p_overview)
+
+ggsave(
+  filename = file.path(results_folder, "CI_Overview_Plot.png"),
+  plot = p_overview,
+  width = 12,
+  height = 10,
+  dpi = 300
+)
+```
+
+## 6.2 Graphiques individuels par indicateur
+
+```{r plot_individual, fig.width=10, fig.height=6}
+indicators <- unique(plot_data$Indicator)
+
+for(indicator in indicators) {
+  
+  p_ind <- ggplot(plot_data %>% filter(Indicator == indicator), 
+              aes(x = Country, y = CI, fill = Period)) +
+    geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+    geom_hline(yintercept = 0, linetype = "solid", color = "black") +
+    geom_hline(yintercept = c(-0.1, 0.1), linetype = "dashed", color = "red", alpha = 0.5) +
+    labs(
+      title = paste("Concentration Index:", indicator),
+      subtitle = ifelse(grepl("Foregone|Catastrophic", indicator),
+                       "Negative values indicate that poor are more affected",
+                       "Positive values indicate that rich have better access"),
+      x = "Country",
+      y = "Concentration Index",
+      fill = "Period"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title = element_text(face = "bold"),
+      legend.position = "bottom"
+    ) +
+    scale_fill_manual(values = c("2018/2019" = "#1f77b4", "2021/2022" = "#ff7f0e"))
+  
+  print(p_ind)
+  
+  filename <- gsub("[^A-Za-z0-9]", "_", indicator)
+  ggsave(
+    filename = file.path(results_folder, paste0("CI_", filename, ".png")),
+    plot = p_ind,
+    width = 10,
+    height = 6,
+    dpi = 300
+  )
+}
+```
+
+## 6.3 Changements temporels
+
+```{r plot_temporal_change, fig.width=12, fig.height=7}
+comparison_data <- plot_data %>%
+  select(Country, Period, Indicator, CI) %>%
+  pivot_wider(names_from = Period, values_from = CI) %>%
+  filter(!is.na(`2018/2019`) & !is.na(`2021/2022`)) %>%
+  mutate(Change = `2021/2022` - `2018/2019`)
+
+p_change <- ggplot(comparison_data, aes(x = Country, y = Change, fill = Indicator)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +
+  labs(
+    title = "Change in Concentration Indices between 2018/2019 and 2021/2022",
+    subtitle = "Positive values indicate increasing inequality",
+    x = "Country",
+    y = "Change in CI",
+    fill = "Indicator"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    legend.text = element_text(size = 8)
+  ) +
+  scale_fill_brewer(palette = "Set2")
+
+print(p_change)
+
+ggsave(
+  filename = file.path(results_folder, "CI_Temporal_Change.png"),
+  plot = p_change,
+  width = 12,
+  height = 7,
+  dpi = 300
+)
+```
+
+## 6.4 Heatmap des indices
+
+```{r plot_heatmap, fig.width=14, fig.height=10}
+heatmap_data <- plot_data %>%
+  mutate(Country_Period = paste(Country, Period)) %>%
+  select(Country_Period, Indicator, CI)
+
+heatmap_wide <- heatmap_data %>%
+  pivot_wider(names_from = Indicator, values_from = CI)
+
+heatmap_long <- heatmap_wide %>%
+  pivot_longer(cols = -Country_Period, 
+               names_to = "Indicator", 
+               values_to = "CI")
+
+p_heat <- ggplot(heatmap_long, aes(x = Indicator, y = Country_Period, fill = CI)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.3f", CI)), size = 3) +
+  scale_fill_gradient2(low = "darkred", mid = "white", high = "darkgreen", 
+                       midpoint = 0, limits = c(-0.8, 0.8)) +
+  labs(
+    title = "Concentration Indices Heatmap - UEMOA Countries",
+    x = "",
+    y = "",
+    fill = "CI"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    axis.text.y = element_text(size = 8),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+print(p_heat)
+
+ggsave(
+  filename = file.path(results_folder, "CI_Heatmap.png"),
+  plot = p_heat,
+  width = 14,
+  height = 10,
+  dpi = 300
+)
+```
+
+# 7. Résumé et interprétation
+
+```{r summary}
+cat("\n=== RÉSUMÉ DES RÉSULTATS ===\n")
+cat("\nFichiers créés dans:", results_folder)
+cat("\n- Table3_Concentration_Indices.docx (Document Word avec tableaux formatés)")
+cat("\n- Table3_Concentration_Indices.xlsx (Excel avec résultats détaillés)")
+cat("\n- CI_Overview_Plot.png (Vue d'ensemble)")
+cat("\n- Graphiques individuels pour chaque indicateur")
+cat("\n- CI_Temporal_Change.png (Changements temporels)")
+cat("\n- CI_Heatmap.png (Carte de chaleur)")
+
+cat("\n\nRésumé des résultats:")
+cat("\n- Indices calculés:", nrow(results$details))
+cat("\n- Significatifs (p<0.05):", sum(results$details$Significant == "Yes"))
+
+cat("\n\nConcentration moyenne par indicateur:")
+summary_stats <- results$details %>%
+  group_by(Indicator) %>%
+  summarise(
+    Mean_CI = round(mean(CI, na.rm = TRUE), 4),
+    N_significant = sum(Significant == "Yes", na.rm = TRUE),
+    .groups = "drop"
+  )
+
+for(i in 1:nrow(summary_stats)) {
+  cat("\n-", summary_stats$Indicator[i], ":", summary_stats$Mean_CI[i])
+  if(grepl("Foregone care|Catastrophic", summary_stats$Indicator[i])) {
+    if(summary_stats$Mean_CI[i] < 0) {
+      cat(" (Pro-pauvre - Les pauvres sont plus affectés)")
+    }
+  } else {
+    if(summary_stats$Mean_CI[i] > 0) {
+      cat(" (Pro-riche - Les riches ont plus accès)")
+    }
+  }
+}
+
+cat("\n\nNote sur l'interprétation:")
+cat("\n- Foregone care for financial reasons : captures uniquement le renoncement pour raisons financières")
+cat("\n- Les autres formes de renoncement (distance, qualité, etc.) ne sont pas incluses")
+
+cat("\n\nAnalyse complète terminée avec succès!\n")
+```
+
