@@ -855,3 +855,348 @@ foreach annee of global annees {
 
 
 log close
+
+
+
+clear all
+set more off
+
+* Définir les chemins
+global path_2018 "C:\Users\mamad\OneDrive\Documents\Android\CMU\Bibliographie\Senegal\Enquete menages\EHCVM\2018-2019"
+global path_2021 "C:\Users\mamad\OneDrive\Documents\Android\CMU\Bibliographie\Senegal\Enquete menages\EHCVM\2021-2022"
+
+* Programme de recodage harmonisé
+capture program drop recode_maladie
+program define recode_maladie
+    args year
+    
+    gen maladie_cat = .
+    label var maladie_cat "Catégorie de maladie harmonisée"
+    
+    if "`year'" == "2018" {
+        replace maladie_cat = 1 if inlist(maladie, 1, 2, 8, 13)
+        replace maladie_cat = 2 if inlist(maladie, 7, 12)
+        replace maladie_cat = 3 if inlist(maladie, 10, 11)
+        replace maladie_cat = 4 if inlist(maladie, 9, 15, 16)
+        replace maladie_cat = 5 if maladie == 3
+        replace maladie_cat = 6 if maladie == 4
+        replace maladie_cat = 7 if maladie == 5
+        replace maladie_cat = 8 if maladie == 6
+        replace maladie_cat = 9 if maladie == 18
+        replace maladie_cat = 10 if inlist(maladie, 14, 17)
+    }
+    else if "`year'" == "2021" {
+        replace maladie_cat = 1 if inlist(maladie, 1, 2, 8, 13, 14)
+        replace maladie_cat = 2 if inlist(maladie, 7, 12, 17)
+        replace maladie_cat = 3 if inlist(maladie, 10, 11, 20)
+        replace maladie_cat = 4 if inlist(maladie, 9, 19)
+        replace maladie_cat = 5 if maladie == 3
+        replace maladie_cat = 6 if maladie == 4
+        replace maladie_cat = 7 if maladie == 5
+        replace maladie_cat = 8 if maladie == 6
+        replace maladie_cat = 9 if maladie == 15
+        replace maladie_cat = 10 if inlist(maladie, 16, 18)
+    }
+    
+    label define maladie_cat ///
+        1 "Maladies infectieuses" ///
+        2 "Maladies non transmissibles" ///
+        3 "Maladies respiratoires" ///
+        4 "Problèmes digestifs" ///
+        5 "Traumatismes" ///
+        6 "Problèmes dentaires" ///
+        7 "Problèmes dermatologiques" ///
+        8 "Problèmes ophtalmologiques" ///
+        9 "Problèmes gynécologiques" ///
+        10 "Autres symptômes"
+    label values maladie_cat maladie_cat
+end
+
+*==============================================================================
+* TRAITEMENT 2018
+*==============================================================================
+di _n "===== TRAITEMENT BASE 2018 =====" _n
+
+* Charger la base 2018
+use "$path_2018\AUEMOA2018_individus.dta", clear
+
+* Vérifier la variable maladie
+tab maladie, missing
+
+* Appliquer le recodage
+recode_maladie 2018
+
+* Vérifier le recodage
+tab maladie maladie_cat, missing
+tab maladie_cat
+
+* Sauvegarder
+save "$path_2018\AUEMOA2018_individus_recoded.dta", replace
+
+*==============================================================================
+* TRAITEMENT 2021
+*==============================================================================
+di _n "===== TRAITEMENT BASE 2021 =====" _n
+
+* Charger la base 2021
+use "$path_2021\AUEMOA2021_individus.dta", clear
+
+* Vérifier la variable maladie
+tab maladie, missing
+
+* Appliquer le recodage
+recode_maladie 2021
+
+* Vérifier le recodage
+tab maladie maladie_cat, missing
+tab maladie_cat
+
+* Sauvegarder
+save "$path_2021\AUEMOA2021_individus_recoded.dta", replace
+
+
+/*==============================================================================
+        REDISTRIBUTION DE S03Q06_AUTRE DANS LES MODALITÉS EXISTANTES
+                    UEMOA 2021
+==============================================================================*/
+
+clear all
+set more off
+
+* Définir le chemin vers vos données
+global path_2021 "C:\Users\mamad\OneDrive\Documents\Android\CMU\Bibliographie\Senegal\Enquete menages\EHCVM\2021-2022"
+
+* Charger le fichier
+use "$path_2021\AUEMOA2021_individus_recoded.dta", clear
+
+/*------------------------------------------------------------------------------
+    IDENTIFIER LE CODE POUR "AUTRE À PRÉCISER"
+------------------------------------------------------------------------------*/
+
+* Identifier automatiquement le code pour "Autre"
+global code_autre = .
+levelsof s03q06, local(levels)
+foreach val of local levels {
+    local lab : label (s03q06) `val'
+    if strpos(lower("`lab'"), "autre") > 0 | strpos(lower("`lab'"), "préciser") > 0 {
+        display "Code pour 'Autre à préciser' identifié : `val' = `lab'"
+        global code_autre = `val'
+    }
+}
+
+* Si pas trouvé automatiquement, chercher la valeur maximale
+if $code_autre == . {
+    summarize s03q06
+    global code_autre = r(max)
+    display "Code 'Autre' supposé être la valeur maximale : $code_autre"
+}
+
+display _n "Code utilisé pour 'Autre à préciser' : $code_autre"
+
+* Vérifier la distribution actuelle
+tab s03q06, missing
+
+* Créer une copie de s03q06 pour comparaison
+gen s03q06_original = s03q06
+
+* Vérifier si s03q06_autre existe
+capture confirm variable s03q06_autre
+if _rc == 0 {
+    
+    * Convertir en minuscules pour faciliter la recherche
+    gen s03q06_autre_lower = lower(s03q06_autre)
+    
+    * Compter les cas "autre" avant recodage
+    count if s03q06 == $code_autre
+    local n_autre_avant = r(N)
+    display "Nombre de cas 'Autre' avant recodage : `n_autre_avant'"
+    
+    /*--------------------------------------------------------------------------
+        REDISTRIBUTION DANS LES CATÉGORIES EXISTANTES
+    --------------------------------------------------------------------------*/
+    
+    * 1. PAS NÉCESSAIRE (Code 1)
+    replace s03q06 = 1 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "pas nécessaire") | ///
+         regexm(s03q06_autre_lower, "pas grave") | ///
+         regexm(s03q06_autre_lower, "pas trop grave") | ///
+         regexm(s03q06_autre_lower, "bénigne") | ///
+         regexm(s03q06_autre_lower, "rhume") | ///
+         regexm(s03q06_autre_lower, "pas de symptôme") | ///
+         regexm(s03q06_autre_lower, "maladie.*pas.*grave"))
+    
+    * 2. TROP CHER (Code 2) - Inclure tous les problèmes financiers
+    replace s03q06 = 2 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "manque.*moyen") | ///
+         regexm(s03q06_autre_lower, "pas.*moyen") | ///
+         regexm(s03q06_autre_lower, "manque.*financier") | ///
+         regexm(s03q06_autre_lower, "pas.*argent") | ///
+         regexm(s03q06_autre_lower, "pharmacie.*payer") | ///
+         regexm(s03q06_autre_lower, "coût") | ///
+         regexm(s03q06_autre_lower, "cher") | ///
+         regexm(s03q06_autre_lower, "manque de médicament et manque"))
+    
+    * 3. TROP ÉLOIGNÉ (Code 3) - Inclure tous les problèmes d'accès
+    replace s03q06 = 3 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "transport") | ///
+         regexm(s03q06_autre_lower, "déplacement") | ///
+         regexm(s03q06_autre_lower, "éloigné") | ///
+         regexm(s03q06_autre_lower, "route") | ///
+         regexm(s03q06_autre_lower, "voyage") | ///
+         regexm(s03q06_autre_lower, "distance") | ///
+         regexm(s03q06_autre_lower, "difficultés de déplacement"))
+    
+    * 4. AUTOMÉDICATION (Code 4) - Inclure médecine traditionnelle et soins à domicile
+    replace s03q06 = 4 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "tradition") | ///
+         regexm(s03q06_autre_lower, "tisane") | ///
+         regexm(s03q06_autre_lower, "plante") | ///
+         regexm(s03q06_autre_lower, "feuille") | ///
+         regexm(s03q06_autre_lower, "médicinal") | ///
+         regexm(s03q06_autre_lower, "tradiprati") | ///
+         regexm(s03q06_autre_lower, "guérisseur") | ///
+         regexm(s03q06_autre_lower, "traité.*maison") | ///
+         regexm(s03q06_autre_lower, "soin.*domicile") | ///
+         regexm(s03q06_autre_lower, "consultation.*domicile") | ///
+         regexm(s03q06_autre_lower, "infirmier.*maison") | ///
+         regexm(s03q06_autre_lower, "traitement.*maison") | ///
+         regexm(s03q06_autre_lower, "médicament.*maison") | ///
+         regexm(s03q06_autre_lower, "pharmacie") | ///
+         regexm(s03q06_autre_lower, "déjà.*médicament") | ///
+         regexm(s03q06_autre_lower, "sous traitement") | ///
+         regexm(s03q06_autre_lower, "renouvelle"))
+    
+    * 5. PAS DE CONFIANCE (Code 5)
+    replace s03q06 = 5 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "confiance") | ///
+         regexm(s03q06_autre_lower, "méfiance"))
+    
+    * 6. PEUR DU RÉSULTAT/TRAITEMENT (Code 6) - Inclure toutes les peurs
+    replace s03q06 = 6 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "peur") | ///
+         regexm(s03q06_autre_lower, "crainte") | ///
+         regexm(s03q06_autre_lower, "terroriste") | ///
+         regexm(s03q06_autre_lower, "injection") | ///
+         regexm(s03q06_autre_lower, "intervention"))
+    
+    * 7. REFUS (Code 7) - Inclure refus d'hospitalisation
+    replace s03q06 = 7 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "refus") | ///
+         regexm(s03q06_autre_lower, "ne veut pas") | ///
+         regexm(s03q06_autre_lower, "ne voulait pas"))
+    
+    * 8. MANQUE D'ARGENT (Code 8) - Si cette modalité existe séparément
+    * Vérifier si le code 8 existe
+    local has_code8 = 0
+    levelsof s03q06_original, local(orig_levels)
+    foreach val of local orig_levels {
+        if `val' == 8 {
+            local has_code8 = 1
+        }
+    }
+    
+    if `has_code8' == 1 {
+        replace s03q06 = 8 if s03q06 == $code_autre & ///
+            (regexm(s03q06_autre_lower, "argent") & ///
+             !regexm(s03q06_autre_lower, "moyen") & ///
+             !regexm(s03q06_autre_lower, "financier"))
+    }
+    
+    * 9. NON SATISFAIT À LA DERNIÈRE CONSULTATION (Code 9)
+    replace s03q06 = 9 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "non satisfait") | ///
+         regexm(s03q06_autre_lower, "pas satisfait") | ///
+         regexm(s03q06_autre_lower, "mauvais.*service"))
+    
+    * 10. PEUR DE CONTRACTER LA COVID-19 (Code 10)
+    replace s03q06 = 10 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "covid") | ///
+         regexm(s03q06_autre_lower, "corona"))
+    
+    * 11. SERVICE SPÉCIALISÉ NON DISPONIBLE (Code 11) - Inclure manque de médicaments
+    replace s03q06 = 11 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "service.*non.*disponible") | ///
+         regexm(s03q06_autre_lower, "spécialisé.*disponible") | ///
+         regexm(s03q06_autre_lower, "manque.*médicament") | ///
+         regexm(s03q06_autre_lower, "rupture") | ///
+         regexm(s03q06_autre_lower, "indisponib") | ///
+         regexm(s03q06_autre_lower, "pas.*médicament"))
+    
+    * 12. ABSENCE DE PERSONNEL (Code 12)
+    replace s03q06 = 12 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "médecin.*absent") | ///
+         regexm(s03q06_autre_lower, "personnel.*absent") | ///
+         regexm(s03q06_autre_lower, "agent.*santé") | ///
+         regexm(s03q06_autre_lower, "infirmier.*occupé") | ///
+         regexm(s03q06_autre_lower, "absence.*personnel") | ///
+         regexm(s03q06_autre_lower, "médecin.*pas") | ///
+         regexm(s03q06_autre_lower, "médico.*não"))
+    
+    * 13. ATTENTE DE RENDEZ-VOUS (Code 13) - Inclure longue attente
+    replace s03q06 = 13 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "attente") | ///
+         regexm(s03q06_autre_lower, "attendre") | ///
+         regexm(s03q06_autre_lower, "rendez.?vous") | ///
+         regexm(s03q06_autre_lower, "longue file"))
+    
+    /*--------------------------------------------------------------------------
+        GESTION DES CAS RESTANTS
+    --------------------------------------------------------------------------*/
+    
+    * Pour les cas restants, les assigner à la catégorie la plus proche
+    * Handicap/Mobilité -> Trop éloigné (3)
+    replace s03q06 = 3 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "handicap") | ///
+         regexm(s03q06_autre_lower, "paralysé") | ///
+         regexm(s03q06_autre_lower, "peut pas bouger") | ///
+         regexm(s03q06_autre_lower, "mobilité") | ///
+         regexm(s03q06_autre_lower, "ne peut pas se déplacer"))
+    
+    * Temps/Occupation -> Pas nécessaire (1)
+    replace s03q06 = 1 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "pas.*temps") | ///
+         regexm(s03q06_autre_lower, "occupé") | ///
+         regexm(s03q06_autre_lower, "travaux"))
+    
+    * Décès/Veuvage -> Pas nécessaire (1)
+    replace s03q06 = 1 if s03q06 == $code_autre & ///
+        (regexm(s03q06_autre_lower, "décédé") | ///
+         regexm(s03q06_autre_lower, "décès") | ///
+         regexm(s03q06_autre_lower, "mari.*mort"))
+    
+    * Tous les cas restants -> Automédication (4) car c'est la catégorie la plus générale
+    replace s03q06 = 4 if s03q06 == $code_autre
+    
+    /*--------------------------------------------------------------------------
+        VÉRIFICATION ET RAPPORT
+    --------------------------------------------------------------------------*/
+    
+    * Compter les cas restants
+    count if s03q06 == $code_autre
+    local n_autre_apres = r(N)
+    display "Nombre de cas 'Autre' après recodage : `n_autre_apres'"
+    display "Cas redistribués : " `n_autre_avant' - `n_autre_apres'
+    
+    * Tableau de comparaison avant/après
+    display _n "Distribution avant/après recodage:"
+    tab s03q06_original
+    tab s03q06
+    
+    * Tableau croisé pour voir où les cas ont été redistribués
+    tab s03q06_original s03q06 if s03q06_original == $code_autre, row
+    
+    * Nettoyer
+    drop s03q06_autre_lower
+    
+    * Message de confirmation
+    display as result _n "Recodage terminé. Tous les cas 'Autre' ont été redistribués dans les catégories existantes."
+    
+} 
+else {
+    display as error "Variable s03q06_autre non trouvée dans le fichier"
+    display "Veuillez vérifier le nom exact de la variable contenant le texte 'autre'"
+    describe *autre*
+}
+
+* Sauvegarder le fichier recodé
+save "$path_2021\AUEMOA2021_individus_recoded.dta", replace
