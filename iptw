@@ -1,5 +1,5 @@
 ---
-title: "IPTW Selly"
+title: "Analyse IPTW Complète - UEMOA avec Dépenses de Santé"
 output: html_document
 ---
 
@@ -25,7 +25,7 @@ library(flextable)
 library(ggplot2)
 library(gridExtra)
 
-base_path <- "C:/Users/mamad/xxxxx/Enquete menages/EHCVM"
+base_path <- "C:/Users/mamad/OneDrive/Documents/Android/CMU/Bibliographie/Senegal/Enquete menages/EHCVM"
 ```
 
 # 2. Définition des pays et périodes
@@ -94,7 +94,8 @@ analyze_insurance <- function(data, treatment_var, other_insurances = NULL,
   
   ps_vars <- c("age", "I(age^2)", "sexe", "lien", "mstat", "religion",
                "educ_hi", "diplome", "activ12m", "maladie", "use365", "handig",
-               "milieu", "hhsize", "quintile", "hgender", "hage", "hmstat", "heduc")
+               "milieu", "region", "hhsize", "I(hhsize^2)", "quintile", 
+               "hgender", "hage", "I(hage^2)", "hmstat", "heduc")
   
   if("maladie_missing" %in% names(data)) {
     ps_vars <- c(ps_vars, "maladie_missing")
@@ -121,7 +122,7 @@ analyze_insurance <- function(data, treatment_var, other_insurances = NULL,
   iptw_trunc <- pmin(iptw_raw, 20)
   
   balance_vars <- c("age", "sexe", "lien", "mstat", "religion", "educ_hi", 
-                    "activ12m", "maladie", "use365", "handig", "milieu", 
+                    "activ12m", "maladie", "use365", "handig", "milieu", "region",
                     "hhsize", "quintile", "hgender", "hage", "hmstat", "heduc")
   
   if("maladie_missing" %in% names(data)) {
@@ -132,8 +133,7 @@ analyze_insurance <- function(data, treatment_var, other_insurances = NULL,
   balance_vars <- balance_vars[balance_vars != "use90"]
   
   covs <- data %>% 
-    select(all_of(balance_vars)) %>%
-    mutate(across(where(is.factor), as.numeric))
+    select(all_of(balance_vars))
   
   bal_tab <- bal.tab(covs,
                      treat = treatment,
@@ -142,7 +142,12 @@ analyze_insurance <- function(data, treatment_var, other_insurances = NULL,
                      estimand = "ATT",
                      disp = c("means", "sds"),
                      stats = c("mean.diffs"),
-                     thresholds = c(m = 0.1))
+                     thresholds = c(m = 0.1),
+                     continuous = "std",
+                     binary = "std",
+                     disp.v.ratio = FALSE,
+                     disp.ks = FALSE,
+                     abs = TRUE)
   
   final_weights <- iptw_trunc * data$hhweight
   
@@ -278,11 +283,14 @@ analyze_insurance <- function(data, treatment_var, other_insurances = NULL,
                                               ))
   }
   
+  balance_summary <- create_balance_summary(bal_tab$Balance)
+  
   return(list(
     variable = treatment_var,
     n_treated = sum(treatment),
     n_control = sum(1 - treatment),
     balance_table = bal_tab$Balance,
+    balance_summary = balance_summary,
     results_multi = results_multi,
     e_values = e_values,
     sensitivity = sensitivity_results
@@ -371,7 +379,7 @@ analyze_health_expenditure <- function(data, treatment_var, other_insurances = N
   }
   
   ps_vars_base <- c("age", "I(age^2)", "sexe", "lien", "mstat", "religion",
-                     "educ_hi", "diplome", "milieu", "hhsize")
+                     "educ_hi", "diplome", "milieu", "region", "hhsize", "I(hhsize^2)")
   
   ps_vars_econ <- c("quintile", "activ12m")
   
@@ -381,7 +389,7 @@ analyze_health_expenditure <- function(data, treatment_var, other_insurances = N
     ps_vars_health <- c(ps_vars_health, "maladie_missing")
   }
   
-  ps_vars_household <- c("hgender", "hage", "hmstat", "heduc")
+  ps_vars_household <- c("hgender", "hage", "I(hage^2)", "hmstat", "heduc")
   
   ps_vars <- c(ps_vars_base, ps_vars_econ, ps_vars_health, ps_vars_household)
   
@@ -414,7 +422,7 @@ analyze_health_expenditure <- function(data, treatment_var, other_insurances = N
   iptw_trunc <- pmin(iptw_raw, 20)
   
   balance_vars <- c("age", "sexe", "lien", "mstat", "religion", "educ_hi", 
-                    "activ12m", "maladie", "use365", "handig", "milieu", 
+                    "activ12m", "maladie", "use365", "handig", "milieu", "region",
                     "hhsize", "quintile", "hgender", "hage", "hmstat", "heduc")
   
   if("maladie_missing" %in% names(data_users)) {
@@ -427,8 +435,7 @@ analyze_health_expenditure <- function(data, treatment_var, other_insurances = N
   balance_vars <- balance_vars[balance_vars %in% names(data_users)]
   
   covs <- data_users %>% 
-    select(all_of(balance_vars)) %>%
-    mutate(across(where(is.factor), as.numeric))
+    select(all_of(balance_vars))
   
   bal_tab <- bal.tab(covs,
                      treat = treatment,
@@ -437,7 +444,12 @@ analyze_health_expenditure <- function(data, treatment_var, other_insurances = N
                      estimand = "ATT",
                      disp = c("means", "sds"),
                      stats = c("mean.diffs"),
-                     thresholds = c(m = 0.1))
+                     thresholds = c(m = 0.1),
+                     continuous = "std",
+                     binary = "std",
+                     disp.v.ratio = FALSE,
+                     disp.ks = FALSE,
+                     abs = TRUE)
   
   final_weights <- iptw_trunc * data_users$hhweight
   
@@ -516,6 +528,8 @@ analyze_health_expenditure <- function(data, treatment_var, other_insurances = N
                                 ))
   }
   
+  balance_summary <- create_balance_summary(bal_tab$Balance)
+  
   return(list(
     variable = treatment_var,
     n_treated = sum(treatment),
@@ -523,10 +537,94 @@ analyze_health_expenditure <- function(data, treatment_var, other_insurances = N
     n_users = nrow(data_users),
     n_initial_users = n_initial_users,
     balance_table = bal_tab$Balance,
+    balance_summary = balance_summary,
     results = results,
     sensitivity = sensitivity_results,
     ps_vars_used = final_ps_vars
   ))
+}
+```
+
+## 3.3 Fonction pour créer un résumé de l'équilibre
+
+```{r balance-summary-function}
+create_balance_summary <- function(balance_table) {
+  
+  continuous_vars <- c("age", "hhsize", "hage", "I(age^2)", "I(hhsize^2)", "I(hage^2)")
+  
+  var_names <- rownames(balance_table)
+  
+  base_vars <- unique(gsub("_.*", "", var_names[!grepl("^I\\(", var_names)]))
+  
+  summary_list <- list()
+  
+  for(var in base_vars) {
+    var_rows <- grep(paste0("^", var, "(_|$)"), var_names)
+    
+    if(length(var_rows) > 1) {
+      max_smd <- max(abs(balance_table$Diff.Adj[var_rows]), na.rm = TRUE)
+      n_levels <- length(var_rows)
+      n_unbalanced <- sum(abs(balance_table$Diff.Adj[var_rows]) > 0.1, na.rm = TRUE)
+      
+      summary_list[[var]] <- data.frame(
+        Variable = var,
+        Type = "Categorical",
+        N_Levels = n_levels,
+        Max_SMD = round(max_smd, 3),
+        N_Unbalanced_Levels = n_unbalanced,
+        Balanced = ifelse(max_smd <= 0.1, "Yes", "No")
+      )
+    } else if(length(var_rows) == 1) {
+      smd <- abs(balance_table$Diff.Adj[var_rows])
+      
+      var_type <- ifelse(var %in% continuous_vars, "Continuous", "Binary")
+      
+      summary_list[[var]] <- data.frame(
+        Variable = var,
+        Type = var_type,
+        N_Levels = 1,
+        Max_SMD = round(smd, 3),
+        N_Unbalanced_Levels = ifelse(smd > 0.1, 1, 0),
+        Balanced = ifelse(smd <= 0.1, "Yes", "No")
+      )
+    }
+  }
+  
+  quadratic_terms <- var_names[grepl("^I\\(.*\\^2\\)", var_names)]
+  for(term in quadratic_terms) {
+    term_row <- which(var_names == term)
+    if(length(term_row) == 1) {
+      smd <- abs(balance_table$Diff.Adj[term_row])
+      
+      summary_list[[term]] <- data.frame(
+        Variable = term,
+        Type = "Quadratic",
+        N_Levels = 1,
+        Max_SMD = round(smd, 3),
+        N_Unbalanced_Levels = ifelse(smd > 0.1, 1, 0),
+        Balanced = ifelse(smd <= 0.1, "Yes", "No")
+      )
+    }
+  }
+  
+  if(length(summary_list) > 0) {
+    summary_df <- do.call(rbind, summary_list)
+    rownames(summary_df) <- NULL
+    
+    summary_df <- rbind(summary_df, 
+                       data.frame(
+                         Variable = "OVERALL",
+                         Type = "Summary",
+                         N_Levels = sum(summary_df$N_Levels),
+                         Max_SMD = max(summary_df$Max_SMD),
+                         N_Unbalanced_Levels = sum(summary_df$N_Unbalanced_Levels),
+                         Balanced = ifelse(sum(summary_df$N_Unbalanced_Levels) == 0, "Yes", "No")
+                       ))
+    
+    return(summary_df)
+  } else {
+    return(NULL)
+  }
 }
 ```
 
@@ -559,7 +657,7 @@ process_country_period <- function(country, period_year) {
     select(all_of(existing_variables)) %>%
     filter(!is.na(non_soinsttfin)) %>%
     mutate(
-      across(c("sexe", "milieu", "lien", "mstat", "religion", 
+      across(c("sexe", "milieu", "region", "lien", "mstat", "religion", 
                "educ_hi", "diplome", "activ12m", "handig",
                "use365", "quintile",
                "hgender", "hmstat", "heduc"), 
@@ -567,11 +665,12 @@ process_country_period <- function(country, period_year) {
       maladie = as.factor(as.character(maladie)),
       age = as.numeric(age),
       hhsize = as.numeric(hhsize),
+      hage = as.numeric(hage),
       oop = as.numeric(oop),
       dtot = as.numeric(dtot),
       use = as.numeric(use)
     ) %>%
-    drop_na(couvmal, non_soinsttfin, age, sexe, milieu)
+    drop_na(couvmal, non_soinsttfin, age, sexe, milieu, region)
   
   results <- list()
   
@@ -645,6 +744,7 @@ expenditure_summary_list <- list()
 sensitivity_list <- list()
 expenditure_sensitivity_list <- list()
 balance_list <- list()
+balance_detail_list <- list()
 
 for(key in names(all_results_complete)) {
   res <- all_results_complete[[key]]
@@ -708,6 +808,15 @@ for(key in names(all_results_complete)) {
         }
       }
       
+      if(!is.null(res$results[[ins_type]]$balance_summary)) {
+        balance_sum <- res$results[[ins_type]]$balance_summary
+        balance_sum$Country <- res$country
+        balance_sum$Period <- res$period
+        balance_sum$Insurance_Type <- ins_type
+        balance_sum$Analysis <- "Forgone care"
+        balance_detail_list[[length(balance_detail_list) + 1]] <- balance_sum
+      }
+      
       if(!is.null(res$results[[ins_type]]$balance_table)) {
         balance_summary <- data.frame(
           Country = res$country,
@@ -764,6 +873,15 @@ for(key in names(all_results_complete)) {
         }
       }
       
+      if(!is.null(res$results[[ins_type]]$balance_summary)) {
+        balance_sum <- res$results[[ins_type]]$balance_summary
+        balance_sum$Country <- res$country
+        balance_sum$Period <- res$period
+        balance_sum$Insurance_Type <- clean_ins_type
+        balance_sum$Analysis <- "Health expenditure"
+        balance_detail_list[[length(balance_detail_list) + 1]] <- balance_sum
+      }
+      
       if(!is.null(res$results[[ins_type]]$balance_table)) {
         balance_summary <- data.frame(
           Country = res$country,
@@ -784,7 +902,8 @@ complete_results <- list(
   expenditure = if(length(expenditure_summary_list) > 0) do.call(rbind, expenditure_summary_list) else NULL,
   sensitivity = if(length(sensitivity_list) > 0) do.call(rbind, sensitivity_list) else NULL,
   expenditure_sensitivity = if(length(expenditure_sensitivity_list) > 0) do.call(rbind, expenditure_sensitivity_list) else NULL,
-  balance = if(length(balance_list) > 0) do.call(rbind, balance_list) else NULL
+  balance = if(length(balance_list) > 0) do.call(rbind, balance_list) else NULL,
+  balance_detail = if(length(balance_detail_list) > 0) do.call(rbind, balance_detail_list) else NULL
 )
 ```
 
@@ -805,6 +924,10 @@ if(!is.null(complete_results$balance)) {
   excel_sheets[["Balance_Summary"]] <- complete_results$balance
 }
 
+if(!is.null(complete_results$balance_detail)) {
+  excel_sheets[["Balance_Detailed"]] <- complete_results$balance_detail
+}
+
 if(!is.null(complete_results$sensitivity)) {
   excel_sheets[["Sensitivity_Forgone"]] <- complete_results$sensitivity
 }
@@ -816,7 +939,7 @@ if(!is.null(complete_results$expenditure_sensitivity)) {
 if(!is.null(complete_results$summary) && !is.null(complete_results$sensitivity)) {
   
   sens_wide <- complete_results$sensitivity %>%
-    filter(Forgone_Type == "Financial") %>%
+    filter(Forgone_Type == "financial") %>%
     select(Country, Period, Insurance_Type, Method, OR) %>%
     pivot_wider(names_from = Method, values_from = OR, names_prefix = "OR_")
   
@@ -862,78 +985,6 @@ if(!is.null(complete_results$expenditure) && !is.null(complete_results$expenditu
     arrange(Country, Period, Insurance_Type)
   
   excel_sheets[["Synthesis_Expenditure"]] <- synthesis_expenditure
-  
-  publication_table <- complete_results$expenditure %>%
-    filter(Significant == "Yes") %>%
-    mutate(
-      Effect = ifelse(Reduction_Pct < 0, 
-                     paste0(sprintf("%.0f", abs(Reduction_Pct)), "%"),
-                     paste0("+", sprintf("%.0f", Reduction_Pct), "%")),
-      CI_Low_Pct = (CI_Lower / OOP_Control) * 100,
-      CI_High_Pct = (CI_Upper / OOP_Control) * 100,
-      CI_95 = paste0("[", sprintf("%.0f", CI_Low_Pct), " to ", 
-                     sprintf("%.0f", CI_High_Pct), "%]"),
-      Comparison = paste0(sprintf("%.1f", OOP_Control), " → ", 
-                         sprintf("%.1f", OOP_Treated), "%"),
-      P_Display = case_when(
-        P_Value < 0.001 ~ "<0.001",
-        P_Value < 0.01 ~ sprintf("%.3f", P_Value),
-        TRUE ~ sprintf("%.2f", P_Value)
-      )
-    ) %>%
-    select(Country, Period, Insurance_Type, N_Treated, 
-           Comparison, Effect, CI_95, P_Display) %>%
-    rename(
-      "Insurance" = Insurance_Type,
-      "N" = N_Treated,
-      "OOP share (Control → Treated)" = Comparison,
-      "Reduction" = Effect,
-      "95% CI" = CI_95,
-      "p-value" = P_Display
-    ) %>%
-    arrange(Country, Period, Insurance)
-  
-  excel_sheets[["Publication_Table"]] <- publication_table
-}
-
-if(!is.null(complete_results$summary) || !is.null(complete_results$expenditure)) {
-  
-  summary_global <- data.frame()
-  
-  if(!is.null(complete_results$summary)) {
-    forgone_summary <- complete_results$summary %>%
-      filter(Forgone_Type == "Financial") %>%
-      group_by(Insurance_Type, Period) %>%
-      summarise(
-        Analysis = "Forgone care (financial)",
-        N_Countries = n(),
-        N_Significant = sum(Significant == "Yes"),
-        Mean_OR = exp(mean(log(OR), na.rm = TRUE)),
-        Min_OR = min(OR, na.rm = TRUE),
-        Max_OR = max(OR, na.rm = TRUE),
-        .groups = "drop"
-      )
-    summary_global <- rbind(summary_global, forgone_summary)
-  }
-  
-  if(!is.null(complete_results$expenditure)) {
-    exp_summary <- complete_results$expenditure %>%
-      group_by(Insurance_Type, Period) %>%
-      summarise(
-        Analysis = "Health expenditure share",
-        N_Countries = n(),
-        N_Significant = sum(Significant == "Yes"),
-        Mean_Reduction = mean(Reduction_Pct[Significant == "Yes"], na.rm = TRUE),
-        Min_Reduction = min(Reduction_Pct[Significant == "Yes"], na.rm = TRUE),
-        Max_Reduction = max(Reduction_Pct[Significant == "Yes"], na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      rename(Mean_OR = Mean_Reduction, Min_OR = Min_Reduction, Max_OR = Max_Reduction)
-    
-    summary_global <- rbind(summary_global, exp_summary)
-  }
-  
-  excel_sheets[["Summary_Global"]] <- summary_global
 }
 
 for(key in names(all_results_complete)) {
@@ -973,10 +1024,6 @@ output_file <- file.path(results_folder, "Resultats_COMPLETS_IPTW_avec_Depenses.
 writexl::write_xlsx(excel_sheets, output_file)
 cat("\nFichier Excel créé:", output_file, "\n")
 cat("Nombre d'onglets:", length(names(excel_sheets)), "\n")
-cat("Onglets créés:\n")
-for(sheet in names(excel_sheets)) {
-  cat(" -", sheet, "\n")
-}
 ```
 
 # 8. Export Word
@@ -994,30 +1041,14 @@ if(!is.null(complete_results$summary)) {
 }
 
 doc <- body_add_par(doc, "RESULTATS DEPENSES DE SANTE", style = "heading 1")
-doc <- body_add_par(doc, 
-  "Effet de l'assurance sur la part des dépenses de santé dans le budget des ménages (parmi les utilisateurs de soins uniquement)",
-  style = "Normal")
 
 if(!is.null(complete_results$expenditure)) {
   ft_exp <- flextable(complete_results$expenditure) %>%
-    set_header_labels(
-      OOP_Control = "OOP sans assurance (%)",
-      OOP_Treated = "OOP avec assurance (%)",
-      Ratio = "Ratio",
-      Reduction_Pct = "Réduction (%)",
-      Coefficient_pp = "Effet (pp)",
-      CI_Lower = "IC 95% inf",
-      CI_Upper = "IC 95% sup"
-    ) %>%
     autofit() %>%
     theme_vanilla()
   
   doc <- body_add_flextable(doc, ft_exp)
   doc <- body_add_par(doc, "", style = "Normal")
-  
-  doc <- body_add_par(doc, 
-    "Note: Ratio < 1 indique une réduction des dépenses. Réduction (%) = (1 - Ratio) × 100",
-    style = "Normal")
 }
 
 doc <- body_add_par(doc, "RESUME EQUILIBRAGE", style = "heading 1")
@@ -1029,27 +1060,18 @@ if(!is.null(complete_results$balance)) {
   doc <- body_add_par(doc, "", style = "Normal")
 }
 
-doc <- body_add_par(doc, "ANALYSE DE SENSIBILITE", style = "heading 1")
-
-if(!is.null(complete_results$sensitivity)) {
-  doc <- body_add_par(doc, "Sensibilité - Renoncement aux soins", style = "heading 2")
-  ft_sens <- flextable(complete_results$sensitivity) %>%
+if(!is.null(complete_results$balance_detail)) {
+  doc <- body_add_par(doc, "EQUILIBRAGE DETAILLE PAR VARIABLE", style = "heading 1")
+  
+  balance_summary_by_country <- complete_results$balance_detail %>%
+    filter(Variable == "OVERALL") %>%
+    select(Country, Period, Insurance_Type, Analysis, N_Unbalanced_Levels, Balanced)
+  
+  ft_balance_detail <- flextable(balance_summary_by_country) %>%
     autofit() %>%
     theme_vanilla()
-  doc <- body_add_flextable(doc, ft_sens)
-  doc <- body_add_par(doc, "", style = "Normal")
-}
-
-if(!is.null(complete_results$expenditure_sensitivity)) {
-  doc <- body_add_par(doc, "Sensibilité - Dépenses de santé", style = "heading 2")
-  ft_sens_exp <- flextable(complete_results$expenditure_sensitivity) %>%
-    set_header_labels(
-      Coefficient = "Coefficient (%)",
-      SE = "Erreur-type (%)"
-    ) %>%
-    autofit() %>%
-    theme_vanilla()
-  doc <- body_add_flextable(doc, ft_sens_exp)
+  
+  doc <- body_add_flextable(doc, ft_balance_detail)
   doc <- body_add_par(doc, "", style = "Normal")
 }
 
@@ -1105,110 +1127,98 @@ if(!is.null(complete_results$expenditure)) {
     height = 8,
     dpi = 300
   )
-  
-  mean_comparison_data <- complete_results$expenditure %>%
-    select(Country, Period, Insurance_Type, OOP_Control, OOP_Treated, Significant) %>%
-    pivot_longer(cols = c("OOP_Control", "OOP_Treated"),
-                 names_to = "Group",
-                 values_to = "OOP_Share") %>%
-    mutate(
-      Group = factor(Group, 
-                    levels = c("OOP_Control", "OOP_Treated"),
-                    labels = c("Without Insurance", "With Insurance")),
-      Significance = ifelse(Significant == "Yes", "***", "")
-    )
-  
-  p_means <- ggplot(mean_comparison_data,
-                   aes(x = Country, y = OOP_Share, fill = Group)) +
-    geom_bar(stat = "identity", position = "dodge") +
-    geom_text(data = mean_comparison_data %>% filter(Group == "With Insurance"),
-              aes(label = Significance), 
-              position = position_dodge(0.9), 
-              vjust = -0.5) +
-    facet_grid(Insurance_Type ~ Period) +
-    labs(
-      title = "Health Expenditure Share by Insurance Status",
-      subtitle = "OOP as % of total household expenditure (among care users)",
-      x = "Country",
-      y = "OOP Share (%)",
-      fill = "Group"
-    ) +
-    theme_minimal() +
-    theme(
-      axis.text.x = element_text(angle = 45, hjust = 1),
-      legend.position = "bottom"
-    ) +
-    scale_fill_manual(values = c("Without Insurance" = "#e74c3c", 
-                                "With Insurance" = "#2ecc71")) +
-    scale_y_continuous(limits = c(0, max(mean_comparison_data$OOP_Share) * 1.1))
-  
-  print(p_means)
-  
-  ggsave(
-    filename = file.path(plots_folder, "Mean_Expenditure_Comparison.png"),
-    plot = p_means,
-    width = 14,
-    height = 10,
-    dpi = 300
-  )
 }
 ```
 
-## 9.2 Graphiques d'équilibrage
+## 9.2 Graphiques d'équilibrage améliorés
 
-```{r plots-balance}
-create_balance_plot <- function(balance_table, country, period, insurance_type, 
-                               n_treated, n_control) {
+```{r plots-balance-improved}
+create_balance_plot_improved <- function(balance_table, country, period, insurance_type, 
+                                       n_treated, n_control) {
   
   balance_data <- data.frame(
     Variable = rownames(balance_table),
     SMD_Before = balance_table$Diff.Un,
     SMD_After = balance_table$Diff.Adj,
     stringsAsFactors = FALSE
-  ) %>%
+  )
+  
+  continuous_vars <- c("age", "hhsize", "hage")
+  
+  balance_data$Var_Type <- sapply(balance_data$Variable, function(var) {
+    if(grepl("^I\\(.*\\^2\\)", var)) {
+      return("Quadratic")
+    }
+    else if(var %in% continuous_vars) {
+      return("Continuous")
+    }
+    else if(grepl("_", var)) {
+      return("Categorical Level")
+    }
+    else {
+      return("Binary")
+    }
+  })
+  
+  balance_long <- balance_data %>%
     pivot_longer(cols = c("SMD_Before", "SMD_After"),
                  names_to = "Timing",
                  values_to = "SMD") %>%
     mutate(
       Timing = factor(Timing, 
                      levels = c("SMD_Before", "SMD_After"),
-                     labels = c("Avant pondération", "Après pondération")),
+                     labels = c("Before weighting", "After weighting")),
       Variable = factor(Variable, levels = unique(Variable))
     )
   
-  p <- ggplot(balance_data, aes(x = SMD, y = Variable, color = Timing)) +
+  shape_scale <- c("Continuous" = 16,
+                   "Binary" = 15,
+                   "Categorical Level" = 17,
+                   "Quadratic" = 18)
+  
+  p <- ggplot(balance_long, aes(x = SMD, y = Variable, color = Timing, shape = Var_Type)) +
     geom_point(size = 2, alpha = 0.7) +
     geom_vline(xintercept = 0, linetype = "solid", color = "black") +
     geom_vline(xintercept = c(-0.1, 0.1), linetype = "dashed", color = "red") +
-    scale_color_manual(values = c("Avant pondération" = "darkred", 
-                                 "Après pondération" = "darkgreen")) +
+    scale_color_manual(values = c("Before weighting" = "darkred", 
+                                 "After weighting" = "darkgreen")) +
+    scale_shape_manual(values = shape_scale,
+                      labels = c("Continuous" = "Continuous",
+                                "Binary" = "Binary",
+                                "Categorical Level" = "Categorical level",
+                                "Quadratic" = "Quadratic term")) +
     labs(
       title = paste(country, "-", period, "-", insurance_type),
-      subtitle = paste("N traités:", n_treated, "| N contrôles:", n_control),
-      x = "Différence standardisée moyenne (SMD)",
+      subtitle = paste("N treated:", n_treated, "| N controls:", n_control),
+      x = "Standardized Mean Difference (SMD)",
       y = "Variables",
-      color = ""
+      color = "Weighting",
+      shape = "Variable Type"
     ) +
     theme_minimal() +
     theme(
       legend.position = "bottom",
       plot.title = element_text(face = "bold", size = 12),
       plot.subtitle = element_text(size = 10),
-      axis.text.y = element_text(size = 8)
+      axis.text.y = element_text(size = 8),
+      legend.box = "vertical"
     ) +
     xlim(-0.5, 0.5)
   
   return(p)
 }
 
-for(key in names(all_results_complete)[1:min(4, length(all_results_complete))]) {
+cat("\nCréation des graphiques d'équilibrage pour toutes les analyses...\n")
+plot_count <- 0
+
+for(key in names(all_results_complete)) {
   res <- all_results_complete[[key]]
   
-  for(ins_type in names(res$results)[1:min(2, length(res$results))]) {
+  for(ins_type in names(res$results)) {
     if(!is.null(res$results[[ins_type]]) && 
        !is.null(res$results[[ins_type]]$balance_table)) {
       
-      p <- create_balance_plot(
+      p <- create_balance_plot_improved(
         balance_table = res$results[[ins_type]]$balance_table,
         country = res$country,
         period = res$period,
@@ -1229,15 +1239,23 @@ for(key in names(all_results_complete)[1:min(4, length(all_results_complete))]) 
       ggsave(
         filename = filepath,
         plot = p,
-        width = 8,
-        height = 6,
+        width = 10,
+        height = 8,
         dpi = 300
       )
+      
+      plot_count <- plot_count + 1
+      cat("  Créé:", filename, "\n")
     }
   }
 }
 
-country_balance_data <- list()
+cat("Total de graphiques d'équilibrage créés:", plot_count, "\n")
+
+cat("\nCréation des graphiques combinés par pays (forgone et expenditure séparément)...\n")
+
+country_balance_data_forgone <- list()
+country_balance_data_expenditure <- list()
 
 for(key in names(all_results_complete)) {
   res <- all_results_complete[[key]]
@@ -1256,17 +1274,39 @@ for(key in names(all_results_complete)) {
         N = paste0("N=", res$results[[ins_type]]$n_treated)
       )
       
-      if(!country_code %in% names(country_balance_data)) {
-        country_balance_data[[country_code]] <- list()
+      if(!country_code %in% names(country_balance_data_forgone)) {
+        country_balance_data_forgone[[country_code]] <- list()
       }
-      country_balance_data[[country_code]][[paste(ins_type, res$period, sep="_")]] <- bal_data
+      country_balance_data_forgone[[country_code]][[paste(ins_type, res$period, sep="_")]] <- bal_data
+    }
+  }
+  
+  for(ins_type in c("couvmal_expenditure", "assu_ext_expenditure", "assu_soc_expenditure")) {
+    if(!is.null(res$results[[ins_type]]) && !is.null(res$results[[ins_type]]$balance_table)) {
+      
+      bal_table <- res$results[[ins_type]]$balance_table
+      
+      bal_data <- data.frame(
+        Variable = rownames(bal_table),
+        SMD = bal_table$Diff.Adj,
+        Insurance = gsub("_expenditure", "", ins_type),
+        Period = res$period,
+        N = paste0("N=", res$results[[ins_type]]$n_treated)
+      )
+      
+      if(!country_code %in% names(country_balance_data_expenditure)) {
+        country_balance_data_expenditure[[country_code]] <- list()
+      }
+      country_balance_data_expenditure[[country_code]][[paste(ins_type, res$period, sep="_")]] <- bal_data
     }
   }
 }
 
-for(country_code in names(country_balance_data)) {
+cat("\nCréation des graphiques combinés FORGONE CARE...\n")
+
+for(country_code in names(country_balance_data_forgone)) {
   
-  country_data_list <- country_balance_data[[country_code]]
+  country_data_list <- country_balance_data_forgone[[country_code]]
   if(length(country_data_list) == 0) next
   
   combined_data <- do.call(rbind, country_data_list)
@@ -1282,25 +1322,285 @@ for(country_code in names(country_balance_data)) {
       Panel = paste(Insurance_Label, Period, sep = "\n")
     )
   
-  p_combined <- ggplot(combined_data, aes(x = SMD, y = Variable)) +
-    geom_point(size = 2, color = "darkblue", alpha = 0.7) +
+  n_vars_all <- length(unique(combined_data$Variable))
+  plot_height_all <- max(10, 6 + n_vars_all * 0.15)
+  
+  p_all <- ggplot(combined_data, aes(x = SMD, y = Variable)) +
+    geom_point(size = 2, color = "darkgreen", alpha = 0.7) +
     geom_vline(xintercept = 0, linetype = "solid", color = "black") +
     geom_vline(xintercept = c(-0.1, 0.1), linetype = "dashed", color = "red") +
     facet_wrap(~ Panel, ncol = 3) +
     labs(
-      title = paste("Balance After IPTW -", countries[[country_code]]$name),
-      subtitle = "Standardized Mean Differences after weighting",
+      title = paste("Balance After IPTW -", countries[[country_code]]$name, "- FORGONE CARE"),
+      subtitle = paste("ALL variables (n =", n_vars_all, ")"),
       x = "SMD",
       y = "Variables"
     ) +
     theme_minimal() +
     theme(
       strip.text = element_text(size = 9, face = "bold"),
-      axis.text.y = element_text(size = 7),
+      axis.text.y = element_text(size = 6),
       plot.title = element_text(face = "bold", size = 14)
     ) +
     xlim(-0.3, 0.3)
   
   ggsave(
-    filename = file.path(balance_forgone_folder, paste0("Balance_Combined_", country_code, "_Forgone.png")),
-    plot
+    filename = file.path(plots_folder, paste0("Balance_Combined_Forgone_ALL_", country_code, ".png")),
+    plot = p_all,
+    width = 12,
+    height = plot_height_all,
+    dpi = 300
+  )
+  
+  important_vars <- combined_data %>%
+    group_by(Variable) %>%
+    summarise(max_smd = max(abs(SMD))) %>%
+    filter(max_smd > 0.05) %>%
+    pull(Variable)
+  
+  if(length(important_vars) > 0) {
+    combined_data_filtered <- combined_data %>%
+      filter(Variable %in% important_vars)
+    
+    n_vars_filtered <- length(unique(combined_data_filtered$Variable))
+    plot_height_filtered <- max(8, 6 + n_vars_filtered * 0.2)
+    
+    p_filtered <- ggplot(combined_data_filtered, aes(x = SMD, y = Variable)) +
+      geom_point(size = 2, color = "darkgreen", alpha = 0.7) +
+      geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+      geom_vline(xintercept = c(-0.1, 0.1), linetype = "dashed", color = "red") +
+      facet_wrap(~ Panel, ncol = 3) +
+      labs(
+        title = paste("Balance After IPTW -", countries[[country_code]]$name, "- FORGONE CARE"),
+        subtitle = paste("Variables with |SMD| > 0.05 (n =", n_vars_filtered, "out of", n_vars_all, ")"),
+        x = "SMD",
+        y = "Variables"
+      ) +
+      theme_minimal() +
+      theme(
+        strip.text = element_text(size = 9, face = "bold"),
+        axis.text.y = element_text(size = 7),
+        plot.title = element_text(face = "bold", size = 14)
+      ) +
+      xlim(-0.3, 0.3)
+    
+    ggsave(
+      filename = file.path(plots_folder, paste0("Balance_Combined_Forgone_SMD05_", country_code, ".png")),
+      plot = p_filtered,
+      width = 12,
+      height = plot_height_filtered,
+      dpi = 300
+    )
+  }
+  
+  cat("  Créé graphiques combinés FORGONE pour", countries[[country_code]]$name, "\n")
+}
+
+cat("\nCréation des graphiques combinés HEALTH EXPENDITURE...\n")
+
+for(country_code in names(country_balance_data_expenditure)) {
+  
+  country_data_list <- country_balance_data_expenditure[[country_code]]
+  if(length(country_data_list) == 0) next
+  
+  combined_data <- do.call(rbind, country_data_list)
+  
+  combined_data <- combined_data %>%
+    mutate(
+      Insurance_Label = case_when(
+        Insurance == "couvmal" ~ "All insurance",
+        Insurance == "assu_ext" ~ "Extension schemes",
+        Insurance == "assu_soc" ~ "Social insurance",
+        TRUE ~ Insurance
+      ),
+      Panel = paste(Insurance_Label, Period, sep = "\n")
+    )
+  
+  n_vars_all <- length(unique(combined_data$Variable))
+  plot_height_all <- max(10, 6 + n_vars_all * 0.15)
+  
+  p_all <- ggplot(combined_data, aes(x = SMD, y = Variable)) +
+    geom_point(size = 2, color = "darkred", alpha = 0.7) +
+    geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+    geom_vline(xintercept = c(-0.1, 0.1), linetype = "dashed", color = "red") +
+    facet_wrap(~ Panel, ncol = 3) +
+    labs(
+      title = paste("Balance After IPTW -", countries[[country_code]]$name, "- HEALTH EXPENDITURE"),
+      subtitle = paste("ALL variables (n =", n_vars_all, ")"),
+      x = "SMD",
+      y = "Variables"
+    ) +
+    theme_minimal() +
+    theme(
+      strip.text = element_text(size = 9, face = "bold"),
+      axis.text.y = element_text(size = 6),
+      plot.title = element_text(face = "bold", size = 14)
+    ) +
+    xlim(-0.3, 0.3)
+  
+  ggsave(
+    filename = file.path(plots_folder, paste0("Balance_Combined_Expenditure_ALL_", country_code, ".png")),
+    plot = p_all,
+    width = 12,
+    height = plot_height_all,
+    dpi = 300
+  )
+  
+  important_vars <- combined_data %>%
+    group_by(Variable) %>%
+    summarise(max_smd = max(abs(SMD))) %>%
+    filter(max_smd > 0.05) %>%
+    pull(Variable)
+  
+  if(length(important_vars) > 0) {
+    combined_data_filtered <- combined_data %>%
+      filter(Variable %in% important_vars)
+    
+    n_vars_filtered <- length(unique(combined_data_filtered$Variable))
+    plot_height_filtered <- max(8, 6 + n_vars_filtered * 0.2)
+    
+    p_filtered <- ggplot(combined_data_filtered, aes(x = SMD, y = Variable)) +
+      geom_point(size = 2, color = "darkred", alpha = 0.7) +
+      geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+      geom_vline(xintercept = c(-0.1, 0.1), linetype = "dashed", color = "red") +
+      facet_wrap(~ Panel, ncol = 3) +
+      labs(
+        title = paste("Balance After IPTW -", countries[[country_code]]$name, "- HEALTH EXPENDITURE"),
+        subtitle = paste("Variables with |SMD| > 0.05 (n =", n_vars_filtered, "out of", n_vars_all, ")"),
+        x = "SMD",
+        y = "Variables"
+      ) +
+      theme_minimal() +
+      theme(
+        strip.text = element_text(size = 9, face = "bold"),
+        axis.text.y = element_text(size = 7),
+        plot.title = element_text(face = "bold", size = 14)
+      ) +
+      xlim(-0.3, 0.3)
+    
+    ggsave(
+      filename = file.path(plots_folder, paste0("Balance_Combined_Expenditure_SMD05_", country_code, ".png")),
+      plot = p_filtered,
+      width = 12,
+      height = plot_height_filtered,
+      dpi = 300
+    )
+  }
+  
+  cat("  Créé graphiques combinés EXPENDITURE pour", countries[[country_code]]$name, "\n")
+}
+
+cat("\nCréation des graphiques synthétiques de qualité d'équilibrage...\n")
+
+if(!is.null(complete_results$balance_detail)) {
+  
+  balance_heatmap_data <- complete_results$balance_detail %>%
+    filter(Variable == "OVERALL") %>%
+    mutate(
+      Country_Period = paste(Country, Period),
+      Insurance_Label = case_when(
+        Insurance_Type == "couvmal" ~ "All",
+        Insurance_Type == "assu_ext" ~ "Ext",
+        Insurance_Type == "assu_soc" ~ "Soc",
+        TRUE ~ Insurance_Type
+      ),
+      Analysis_Short = ifelse(Analysis == "Forgone care", "Forgone", "Expenditure"),
+      Label = paste(Insurance_Label, Analysis_Short, sep = "\n"),
+      Pct_Balanced = ((N_Levels - N_Unbalanced_Levels) / N_Levels) * 100,
+      Quality = case_when(
+        Pct_Balanced >= 95 ~ "Excellent",
+        Pct_Balanced >= 90 ~ "Good",
+        Pct_Balanced >= 80 ~ "Fair",
+        TRUE ~ "Poor"
+      )
+    )
+  
+  p_heatmap <- ggplot(balance_heatmap_data, 
+                      aes(x = Label, y = Country_Period, fill = Pct_Balanced)) +
+    geom_tile(color = "white", size = 0.5) +
+    geom_text(aes(label = sprintf("%.0f%%", Pct_Balanced)), 
+              size = 3, color = "white", fontface = "bold") +
+    scale_fill_gradient2(
+      low = "darkred", 
+      mid = "orange", 
+      high = "darkgreen",
+      midpoint = 90,
+      limits = c(70, 100),
+      name = "% Variables\nBalanced"
+    ) +
+    labs(
+      title = "IPTW Balance Quality Overview - All Countries and Analyses",
+      subtitle = "Percentage of variables with |SMD| ≤ 0.1 after weighting",
+      x = "Insurance Type and Analysis",
+      y = "Country and Period"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+      axis.text.y = element_text(size = 9),
+      plot.title = element_text(face = "bold", size = 16),
+      plot.subtitle = element_text(size = 12),
+      legend.position = "right"
+    )
+  
+  print(p_heatmap)
+  
+  ggsave(
+    filename = file.path(plots_folder, "Balance_Quality_Heatmap_ALL.png"),
+    plot = p_heatmap,
+    width = 16,
+    height = 10,
+    dpi = 300
+  )
+  
+  p_simple_overview <- balance_heatmap_data %>%
+    mutate(
+      Analysis_Ins = paste(Insurance_Label, Analysis_Short, sep = "-"),
+      Country_Period_Full = paste(Country, Period, sep = " ")
+    ) %>%
+    ggplot(aes(x = Analysis_Ins, y = Country_Period_Full)) +
+    geom_tile(aes(fill = Pct_Balanced), color = "white", size = 1) +
+    geom_text(aes(label = sprintf("%.0f", Pct_Balanced)), 
+              size = 4, fontface = "bold") +
+    scale_fill_gradient2(
+      low = "firebrick3", 
+      mid = "gold", 
+      high = "forestgreen",
+      midpoint = 90,
+      limits = c(70, 100),
+      name = "% Balanced"
+    ) +
+    labs(
+      title = "IPTW Balance Quality - Quick Overview",
+      subtitle = "Numbers show % of variables with |SMD| ≤ 0.1 (Green>95%, Yellow~90%, Red<85%)",
+      x = "Insurance Type - Analysis",
+      y = ""
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face = "bold"),
+      axis.text.y = element_text(size = 10),
+      plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5),
+      legend.position = "right",
+      panel.grid = element_blank()
+    )
+  
+  print(p_simple_overview)
+  
+  ggsave(
+    filename = file.path(plots_folder, "Balance_Quality_SIMPLE_OVERVIEW.png"),
+    plot = p_simple_overview,
+    width = 14,
+    height = 10,
+    dpi = 300
+  )
+  
+  cat("\nGraphiques synthétiques créés:\n")
+  cat("  - Balance_Quality_SIMPLE_OVERVIEW.png : VUE LA PLUS SYNTHÉTIQUE\n")
+  cat("  - Balance_Quality_Heatmap_ALL.png : Vue d'ensemble en heatmap\n")
+}
+
+cat("\nToutes les analyses et graphiques sont terminés!\n")
+cat("Les résultats sont disponibles dans le dossier:", results_folder, "\n")
+```
